@@ -3,228 +3,124 @@ name: CineStream Cloud Torrent Uploader
 on:
   workflow_dispatch:
     inputs:
-      movie_title:
-        description: 'Film Title (චිත්‍රපටයේ නම)'
+      title:
+        description: 'Movie Title (චිත්‍රපටයේ නම)'
         required: true
         default: 'Mutiny (2026)'
-      magnet_link:
-        description: 'Magnet Link or Torrent URL'
+      magnet:
+        description: 'Torrent Magnet Link'
         required: true
-      poster_url:
-        description: 'Poster Image URL (Optional)'
+      poster:
+        description: 'Poster Image URL (විකල්පයි)'
         required: false
-        default: ''
+        default: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=800'
 
 jobs:
   cloud_download_and_upload:
-    name: Cloud Torrent Engine
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
     steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: 🛠️ Install Torrent Tools (Aria2 & Transmission)
+      - name: 🛠️ Setup Fast Engines
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y aria2 transmission-cli ffmpeg
-          pip install requests urllib3
+          sudo apt-get update -qq
+          sudo apt-get install -y aria2 ffmpeg
+          pip install telethon cryptg requests
 
-      - name: ⚡ Download Torrent & Upload to Telegram
+      - name: 🚀 Torrent Download & Telegram 2GB Upload
         env:
-          MAGNET_LINK: ${{ github.event.inputs.magnet_link }}
-          MOVIE_TITLE: ${{ github.event.inputs.movie_title }}
-          POSTER_URL: ${{ github.event.inputs.poster_url }}
-          TELEGRAM_BOT_TOKEN: "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs"
-          MOVIES_CHANNEL_ID: "-1003984700777"
+          BOT_TOKEN: "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs"
+          MOVIES_CHANNEL: "-1003984700777"
+          THUMBNAILS_CHANNEL: "-1003771325554"
+          MOVIE_TITLE: "${{ github.event.inputs.title }}"
+          MAGNET_LINK: "${{ github.event.inputs.magnet }}"
+          POSTER_URL: "${{ github.event.inputs.poster }}"
         run: |
-          mkdir -p ./downloads
-          chmod 777 ./downloads
+          cat << 'EOF' > uploader.py
+          import os, glob, asyncio, subprocess
+          from telethon import TelegramClient
 
-          cat << 'PYEOF' > run_engine.py
-          import os
-          import re
-          import sys
-          import time
-          import glob
-          import shutil
-          import urllib.parse
-          import subprocess
-          import requests
+          API_ID = 2040
+          API_HASH = "b18441a1ff607e10a989891a5462e627"
+          BOT_TOKEN = os.environ["BOT_TOKEN"]
+          MOVIES_CHANNEL = int(os.environ["MOVIES_CHANNEL"])
+          THUMBNAILS_CHANNEL = int(os.environ["THUMBNAILS_CHANNEL"])
+          TITLE = os.environ["MOVIE_TITLE"]
+          MAGNET = os.environ["MAGNET_LINK"]
+          POSTER = os.environ.get("POSTER_URL", "")
 
-          BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs")
-          MOVIES_CHANNEL_ID = os.environ.get("MOVIES_CHANNEL_ID", "-1003984700777")
-          DOWNLOAD_DIR = os.path.abspath("./downloads")
+          print(f"🎬 [CLOUD 10Gbps] Downloading: '{TITLE}'...")
+          os.makedirs("/tmp/movie_temp", exist_ok=True)
 
-          TRACKERS = [
-              "udp://tracker.opentrackr.org:1337/announce",
-              "http://tracker.opentrackr.org:1337/announce",
-              "udp://open.stealth.si:80/announce",
-              "udp://tracker.torrent.eu.org:451/announce",
-              "udp://explodie.org:6969/announce",
-              "udp://open.demonii.com:1337/announce",
-              "udp://tracker.openbittorrent.com:6969/announce",
-              "udp://9.rarbg.to:2710/announce",
-              "udp://p4p.arenabg.com:1337/announce"
+          # High Speed Trackers for YTS & Global Swarms
+          trackers = (
+              "&tr=udp://tracker.opentrackr.org:1337/announce"
+              "&tr=udp://open.tracker.cl:1337/announce"
+              "&tr=udp://open.demonii.com:1337/announce"
+              "&tr=udp://tracker.openbittorrent.com:80"
+              "&tr=udp://tracker.coppersurfer.tk:6969"
+              "&tr=udp://glotorrents.pw:6969/announce"
+              "&tr=udp://p4p.arenabg.com:1337"
+              "&tr=udp://tracker.leechers-paradise.org:6969"
+          )
+          full_magnet = MAGNET + trackers if not "&tr=" in MAGNET else MAGNET
+
+          # Download using Aria2 multi-connection
+          cmd = [
+              "aria2c",
+              "--enable-dht=true",
+              "--bt-enable-lpd=true",
+              "--enable-peer-exchange=true",
+              "--bt-max-peers=150",
+              "--file-allocation=none",
+              "--seed-time=0",
+              "--summary-interval=5",
+              "--dir=/tmp/movie_temp",
+              full_magnet
           ]
+          subprocess.run(cmd)
 
-          def get_video_file():
-              exts = ("*.mp4", "*.mkv", "*.avi", "*.mov", "*.webm", "*.ts")
-              found = []
-              for ext in exts:
-                  found.extend(glob.glob(os.path.join(DOWNLOAD_DIR, "**", ext), recursive=True))
-              if found:
-                  found.sort(key=lambda f: os.path.getsize(f), reverse=True)
-                  return found[0]
-              
-              all_files = []
-              for root, _, files in os.walk(DOWNLOAD_DIR):
-                  for f in files:
-                      p = os.path.join(root, f)
-                      if not f.endswith((".aria2", ".torrent")):
-                          all_files.append((p, os.path.getsize(p)))
-              if all_files:
-                  all_files.sort(key=lambda x: x[1], reverse=True)
-                  if all_files[0][1] > 40 * 1024 * 1024:
-                      return all_files[0][0]
-              return None
+          # Telethon 2GB MTProto Cloud Upload
+          async def upload_to_telegram():
+              client = TelegramClient('gh_cloud_session', API_ID, API_HASH)
+              await client.start(bot_token=BOT_TOKEN)
 
-          def download_torrent(magnet_url):
-              print(f"🚀 Starting Torrent Download in: {DOWNLOAD_DIR}", flush=True)
-              magnet_url = magnet_url.strip()
+              # Upload Thumbnail
+              if POSTER:
+                  print("🖼️ Uploading Poster...")
+                  try:
+                      await client.send_file(
+                          THUMBNAILS_CHANNEL,
+                          POSTER,
+                          caption=f"🎬 <b>{TITLE}</b>\n🇱🇰 සිංහල උපසිරැසි සහිතයි",
+                          parse_mode='html'
+                      )
+                  except Exception as pe:
+                      print(f"Notice on poster: {pe}")
 
-              finish_script = os.path.abspath("./finish.sh")
-              with open(finish_script, "w") as f:
-                  f.write("#!/bin/sh\nsleep 2\npkill -9 -f transmission-cli 2>/dev/null || true\n")
-              os.chmod(finish_script, 0o755)
+              # Find Video file
+              v_files = glob.glob("/tmp/movie_temp/**/*.mp4", recursive=True) + glob.glob("/tmp/movie_temp/**/*.mkv", recursive=True)
+              if v_files:
+                  m_file = max(v_files, key=os.path.getsize)
+                  size_mb = os.path.getsize(m_file) / (1024 * 1024)
+                  print(f"🚀 Uploading {size_mb:.2f} MB Movie directly to Telegram Channel...")
 
-              cmd_trans = [
-                  "transmission-cli",
-                  "-w", DOWNLOAD_DIR,
-                  "--seedratio", "0",
-                  "-f", finish_script,
-                  magnet_url
-              ]
+                  def progress(current, total):
+                      pct = (current / total) * 100
+                      print(f"\r⚡ Upload: {pct:.1f}% ({current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB)", end="")
 
-              print("⚡ Trying Transmission Engine...", flush=True)
-              try:
-                  proc = subprocess.Popen(cmd_trans, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                  for line in iter(proc.stdout.readline, ""):
-                      l = line.strip()
-                      if l and ("%" in l or "Progress:" in l or "dl from" in l or "Complete" in l):
-                          print(f"⚡ [Transmission] {l}", flush=True)
-                  proc.wait()
-              except Exception as e:
-                  print(f"⚠️ Transmission note: {e}", flush=True)
+                  await client.send_file(
+                      MOVIES_CHANNEL,
+                      m_file,
+                      caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
+                      parse_mode='html',
+                      supports_streaming=True,
+                      progress_callback=progress
+                  )
+                  print("\n\n🎉 සාර්ථකයි! සම්පූර්ණ චිත්‍රපටයම Telegram Channel එකට Upload විය!")
+              else:
+                  print("❌ No video file found.")
 
-              v = get_video_file()
-              if v:
-                  return v
+              await client.disconnect()
 
-              print("⚡ Trying Aria2c 10Gbps Engine...", flush=True)
-              cmd_aria = [
-                  "aria2c",
-                  "--enable-dht=true",
-                  "--follow-torrent=mem",
-                  "--seed-time=0",
-                  "--summary-interval=3",
-                  "--file-allocation=none",
-                  "--max-connection-per-server=16",
-                  "--split=16",
-                  "--dir=" + DOWNLOAD_DIR,
-                  "--bt-tracker=" + ",".join(TRACKERS),
-                  magnet_url
-              ]
-              try:
-                  proc = subprocess.Popen(cmd_aria, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                  for line in iter(proc.stdout.readline, ""):
-                      l = line.strip()
-                      if l and ("%" in l or "DL:" in l or "Complete" in l):
-                          print(f"⚡ [Aria2] {l}", flush=True)
-                  proc.wait()
-              except Exception as e:
-                  print(f"⚠️ Aria2c note: {e}", flush=True)
-
-              return get_video_file()
-
-          def upload_to_telegram(video_path, movie_title):
-              size_mb = os.path.getsize(video_path) / (1024 * 1024)
-              fname = os.path.basename(video_path)
-              print(f"\n📦 Found Movie File: {fname} ({size_mb:.2f} MB)", flush=True)
-
-              # If > 2000 MB, split losslessly using ffmpeg
-              parts = [video_path]
-              if size_mb > 1980:
-                  print("✂️ File is larger than 2GB, splitting into parts with ffmpeg...", flush=True)
-                  out_pat = os.path.join(DOWNLOAD_DIR, "part%02d.mp4")
-                  subprocess.run(["ffmpeg", "-i", video_path, "-c", "copy", "-map", "0", "-segment_time", "01:20:00", "-f", "segment", "-reset_timestamps", "1", out_pat], check=True)
-                  p_files = sorted(glob.glob(os.path.join(DOWNLOAD_DIR, "part*.mp4")))
-                  if p_files:
-                      parts = p_files
-
-              base_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-              for idx, part in enumerate(parts):
-                  p_size = os.path.getsize(part) / (1024 * 1024)
-                  p_name = os.path.basename(part)
-                  part_label = f" (Part {idx+1}/{len(parts)})" if len(parts) > 1 else ""
-                  caption = f"🎬 <b>{movie_title}{part_label}</b>\n\n📁 File: {p_name}\n💾 Size: {p_size:.2f} MB\n✨ CineStream High-Speed Stream"
-
-                  print(f"📤 Uploading Part {idx+1}: {p_name} ({p_size:.2f} MB) to Channel {MOVIES_CHANNEL_ID}...", flush=True)
-
-                  url = f"{base_url}/sendVideo"
-                  data = {
-                      "chat_id": MOVIES_CHANNEL_ID,
-                      "caption": caption,
-                      "parse_mode": "HTML",
-                      "supports_streaming": "true"
-                  }
-
-                  with open(part, "rb") as vf:
-                      resp = requests.post(url, data=data, files={"video": vf}, timeout=1800)
-                      rj = resp.json()
-
-                  if not rj.get("ok"):
-                      print(f"⚠️ sendVideo note: {rj}. Trying sendDocument...", flush=True)
-                      doc_url = f"{base_url}/sendDocument"
-                      with open(part, "rb") as df:
-                          doc_resp = requests.post(doc_url, data={"chat_id": MOVIES_CHANNEL_ID, "caption": caption, "parse_mode": "HTML"}, files={"document": df}, timeout=1800)
-                          rj = doc_resp.json()
-
-                  if rj.get("ok"):
-                      msg_id = rj["result"]["message_id"]
-                      chan_clean = MOVIES_CHANNEL_ID.replace("-100", "")
-                      post_url = f"https://t.me/c/{chan_clean}/{msg_id}"
-                      print("\n=======================================================", flush=True)
-                      print(f"🎉 SUCCESS! MOVIE UPLOADED TO TELEGRAM CHANNEL!", flush=True)
-                      print(f"🔗 Telegram Post Link: {post_url}", flush=True)
-                      print(f"Message ID: {msg_id}", flush=True)
-                      print("=======================================================\n", flush=True)
-                  else:
-                      print(f"❌ Telegram Error: {rj}", flush=True)
-
-          def main():
-              magnet = os.environ.get("MAGNET_LINK", "").strip()
-              title = os.environ.get("MOVIE_TITLE", "New Movie").strip()
-              if not magnet:
-                  print("❌ Error: MAGNET_LINK is required!", flush=True)
-                  sys.exit(1)
-
-              video = download_torrent(magnet)
-              if not video or not os.path.exists(video):
-                  print("❌ Error: No video downloaded.", flush=True)
-                  sys.exit(1)
-
-              upload_to_telegram(video, title)
-
-          if __name__ == "__main__":
-              main()
-          PYEOF
-
-          python3 run_engine.py
+          asyncio.run(upload_to_telegram())
+          EOF
+          python uploader.py
