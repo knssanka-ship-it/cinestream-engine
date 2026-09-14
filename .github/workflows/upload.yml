@@ -56,4 +56,234 @@ jobs:
           DOWNLOAD_DIR: "/tmp/cinestream_cloud"
           LOCAL_BOT_API: "http://127.0.0.1:8081"
         run: |
-          python3 backend/cloud_torrent_uploader.py
+          cat << 'PYEOF' > /tmp/cloud_engine.py
+          import os
+          import re
+          import sys
+          import time
+          import glob
+          import shutil
+          import urllib.parse
+          import urllib.request
+          import subprocess
+          from typing import Optional
+
+          BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs")
+          MOVIES_CHANNEL_ID = os.environ.get("MOVIES_CHANNEL_ID", "-1003984700777")
+          DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/tmp/cinestream_cloud")
+
+          GLOBAL_TRACKERS = [
+              "udp://tracker.opentrackr.org:1337/announce",
+              "http://tracker.opentrackr.org:1337/announce",
+              "udp://open.stealth.si:80/announce",
+              "udp://tracker.torrent.eu.org:451/announce",
+              "udp://explodie.org:6969/announce",
+              "udp://open.demonii.com:1337/announce",
+              "udp://tracker.openbittorrent.com:6969/announce",
+              "udp://tracker.coppersurfer.tk:6969/announce",
+              "http://open.acgnxtracker.com:80/announce",
+              "udp://opentracker.i2p.rocks:6969/announce",
+              "udp://9.rarbg.to:2710/announce",
+              "udp://p4p.arenabg.com:1337/announce"
+          ]
+
+          def extract_hash(magnet_url: str) -> Optional[str]:
+              match = re.search(r'urn:btih:([a-zA-Z0-9]+)', magnet_url, re.IGNORECASE)
+              return match.group(1).upper() if match else None
+
+          def try_fetch_torrent_file(btih: str, output_dir: str) -> Optional[str]:
+              cache_urls = [
+                  f"https://itorrents.org/torrent/{btih}.torrent",
+                  f"https://btcache.me/torrent/{btih}",
+                  f"https://torrage.info/torrent.php?h={btih}"
+              ]
+              target_path = os.path.join(output_dir, f"{btih}.torrent")
+              for url in cache_urls:
+                  try:
+                      print(f"🔍 Checking torrent cache: {url}...", flush=True)
+                      req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                      with urllib.request.urlopen(req, timeout=4) as resp:
+                          content = resp.read()
+                          if len(content) > 500 and (b"d8:announce" in content or b":info" in content):
+                              with open(target_path, "wb") as f:
+                                  f.write(content)
+                              print(f"✅ Found direct .torrent file! ({len(content)} bytes)", flush=True)
+                              return target_path
+                  except Exception:
+                      pass
+              return None
+
+          def download_with_transmission(magnet_or_torrent: str, output_dir: str) -> bool:
+              trans_bin = shutil.which("transmission-cli")
+              if not trans_bin:
+                  return False
+              print("🚀 Launching Transmission Engine (Native BitTorrent Swarm)...", flush=True)
+              finish_script = "/tmp/trans_finish.sh"
+              with open(finish_script, "w") as f:
+                  f.write("#!/bin/sh\nkillall transmission-cli 2>/dev/null || true\n")
+              os.chmod(finish_script, 0o755)
+
+              cmd = [trans_bin, "-w", output_dir, "-f", finish_script, magnet_or_torrent]
+              try:
+                  proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                  for line in iter(proc.stdout.readline, ""):
+                      clean = line.strip()
+                      if clean and ("%" in clean or "Progress:" in clean or "Downloading" in clean):
+                          print(f"⚡ [Transmission] {clean}", flush=True)
+                  proc.wait()
+                  return True
+              except Exception as e:
+                  print(f"⚠️ Transmission note: {e}", flush=True)
+                  return False
+
+          def clean_and_boost_magnet(magnet_url: str) -> str:
+              magnet_url = magnet_url.strip().strip('"').strip("'")
+              if not magnet_url.startswith("magnet:?"):
+                  return magnet_url
+              trackers_to_add = [f"tr={urllib.parse.quote(tr, safe='')}" for tr in GLOBAL_TRACKERS if tr not in magnet_url]
+              if trackers_to_add:
+                  if not magnet_url.endswith("&") and not magnet_url.endswith("?"):
+                      magnet_url += "&"
+                  magnet_url += "&".join(trackers_to_add)
+              return magnet_url
+
+          def find_largest_video(output_dir: str) -> Optional[str]:
+              video_exts = ("*.mp4", "*.mkv", "*.avi", "*.mov", "*.webm", "*.ts", "*.m4v")
+              found = []
+              for ext in video_exts:
+                  found.extend(glob.glob(os.path.join(output_dir, "**", ext), recursive=True))
+              if not found:
+                  all_f = []
+                  for root, _, files in os.walk(output_dir):
+                      for f in files:
+                          p = os.path.join(root, f)
+                          if not f.endswith((".aria2", ".torrent", ".dat")):
+                              all_f.append((p, os.path.getsize(p)))
+                  if all_f:
+                      all_f.sort(key=lambda x: x[1], reverse=True)
+                      if all_f[0][1] > 40 * 1024 * 1024:
+                          return all_f[0][0]
+                  return None
+              found.sort(key=lambda f: os.path.getsize(f), reverse=True)
+              return found[0]
+
+          def download_torrent(magnet_url: str, output_dir: str) -> Optional[str]:
+              os.makedirs(output_dir, exist_ok=True)
+              magnet_url = magnet_url.strip()
+
+              if (magnet_url.startswith("http://") or magnet_url.startswith("https://")) and not magnet_url.endswith(".torrent") and "btcache" not in magnet_url:
+                  print(f"📥 Direct URL detected! Downloading: {magnet_url[:70]}...", flush=True)
+                  try:
+                      subprocess.run(["aria2c", "--max-connection-per-server=16", "--split=16", "--dir", output_dir, magnet_url], check=True)
+                      v = find_largest_video(output_dir)
+                      if v: return v
+                  except Exception as ex:
+                      print(f"⚠️ Aria2 note: {ex}. Using curl...", flush=True)
+                      out_t = os.path.join(output_dir, "movie.mp4")
+                      subprocess.run(["curl", "-L", "-o", out_t, magnet_url], check=True)
+                      return out_t
+
+              try:
+                  dht_p = os.path.join(os.path.expanduser("~"), ".cache", "aria2", "dht.dat")
+                  if os.path.exists(dht_p): os.remove(dht_p)
+              except Exception: pass
+
+              btih = extract_hash(magnet_url)
+              torrent_file = try_fetch_torrent_file(btih, output_dir) if btih else None
+              target_source = torrent_file if torrent_file else clean_and_boost_magnet(magnet_url)
+
+              if shutil.which("transmission-cli"):
+                  print("⚡ Trying Transmission Engine...", flush=True)
+                  download_with_transmission(target_source, output_dir)
+                  v = find_largest_video(output_dir)
+                  if v: return v
+
+              print(f"🧲 Starting Aria2c 10Gbps Engine for: {target_source[:60]}...", flush=True)
+              cmd = [
+                  "aria2c", "--enable-dht=true", "--dht-file-path=/tmp/aria2_dht.dat",
+                  "--dht-listen-port=6881-6999", "--listen-port=6881-6999",
+                  "--dht-entry-point=dht.transmissionbt.com:6881",
+                  "--peer-id-prefix=-TR3000-", "--user-agent=Transmission/3.00",
+                  "--bt-max-peers=120", "--seed-time=0", "--summary-interval=3",
+                  "--dir", output_dir,
+                  "--bt-tracker=" + ",".join(GLOBAL_TRACKERS),
+                  target_source
+              ]
+              try:
+                  proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                  for line in iter(proc.stdout.readline, ""):
+                      clean = line.strip()
+                      if clean and ("%" in clean or "DL:" in clean or "Complete" in clean):
+                          print(f"⚡ {clean}", flush=True)
+                  proc.wait()
+              except Exception as e:
+                  print(f"❌ Aria2c error: {e}", flush=True)
+
+              return find_largest_video(output_dir)
+
+          def upload_to_telegram(video_path: str, movie_title: str):
+              import requests
+              size_mb = os.path.getsize(video_path) / (1024 * 1024)
+              fname = os.path.basename(video_path)
+              caption = f"🎬 <b>{movie_title}</b>\n\n📁 File: {fname}\n💾 Size: {size_mb:.2f} MB\n✨ Fast Cloud Streaming powered by CineStream Engine"
+              print(f"📦 Movie File: {fname} ({size_mb:.2f} MB)", flush=True)
+
+              local_api = os.environ.get("LOCAL_BOT_API", "http://127.0.0.1:8081")
+              is_local = False
+              try:
+                  r = requests.get(local_api, timeout=2)
+                  if r.status_code in [200, 404]: is_local = True
+              except Exception: pass
+
+              api_base = f"{local_api}/bot{BOT_TOKEN}" if is_local else f"https://api.telegram.org/bot{BOT_TOKEN}"
+              print(f"📤 Uploading directly to Channel {MOVIES_CHANNEL_ID} (Local Server: {is_local})...", flush=True)
+
+              try:
+                  url = f"{api_base}/sendVideo"
+                  data = {"chat_id": MOVIES_CHANNEL_ID, "caption": caption, "parse_mode": "HTML", "supports_streaming": "true"}
+                  with open(video_path, "rb") as vf:
+                      resp = requests.post(url, data=data, files={"video": vf}, timeout=3600)
+                      rj = resp.json()
+                      if rj.get("ok"):
+                          msg_id = rj["result"]["message_id"]
+                          chan_clean = MOVIES_CHANNEL_ID.replace("-100", "")
+                          post_link = f"https://t.me/c/{chan_clean}/{msg_id}"
+                          print("\n=======================================================", flush=True)
+                          print(f"🎉 SUCCESS! MOVIE UPLOADED TO TELEGRAM CHANNEL!", flush=True)
+                          print(f"🔗 Telegram Post Link: {post_link}", flush=True)
+                          print(f"Message ID: {msg_id}", flush=True)
+                          print("=======================================================\n", flush=True)
+                          return post_link
+                      else:
+                          print(f"⚠️ Note: sendVideo returned {rj}. Trying sendDocument...", flush=True)
+                          doc_url = f"{api_base}/sendDocument"
+                          with open(video_path, "rb") as df:
+                              dr = requests.post(doc_url, data={"chat_id": MOVIES_CHANNEL_ID, "caption": caption, "parse_mode": "HTML"}, files={"document": df}, timeout=3600)
+                              dj = dr.json()
+                              if dj.get("ok"):
+                                  mid = dj["result"]["message_id"]
+                                  chan_clean = MOVIES_CHANNEL_ID.replace("-100", "")
+                                  post_link = f"https://t.me/c/{chan_clean}/{mid}"
+                                  print(f"🎉 Document Success! Link: {post_link}", flush=True)
+                                  return post_link
+              except Exception as ex:
+                  print(f"❌ Upload error: {ex}", flush=True)
+
+          def main():
+              magnet = os.environ.get("MAGNET_LINK", "").strip()
+              title = os.environ.get("MOVIE_TITLE", "New Movie").strip()
+              if not magnet:
+                  print("❌ Error: MAGNET_LINK is required!", flush=True)
+                  sys.exit(1)
+              print(f"🎬 CineStream Cloud Pipeline Starting for: {title}", flush=True)
+              vfile = download_torrent(magnet, DOWNLOAD_DIR)
+              if not vfile or not os.path.exists(vfile):
+                  print("❌ Error: Torrent download failed or no video found.", flush=True)
+                  sys.exit(1)
+              print(f"🎉 Download Complete: {vfile}", flush=True)
+              upload_to_telegram(vfile, title)
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+          python3 /tmp/cloud_engine.py
