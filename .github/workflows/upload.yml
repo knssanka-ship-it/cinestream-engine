@@ -25,16 +25,15 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python & Node
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: 🛠️ Install High-Speed Torrent Engines (WebTorrent & Aria2)
+      - name: 🛠️ Install System Torrent Tools (Transmission & Aria2)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y aria2 ffmpeg
-          sudo npm install -g webtorrent-cli
+          sudo apt-get install -y aria2 transmission-cli ffmpeg
           pip install requests urllib3
 
       - name: 🚀 Start Local Telegram Bot API Server (Enables 2GB Uploads)
