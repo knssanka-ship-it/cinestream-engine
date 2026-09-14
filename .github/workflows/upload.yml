@@ -38,11 +38,13 @@ jobs:
 
       - name: 🚀 Start Local Telegram Bot API Server (Enables 2GB Uploads)
         run: |
-          mkdir -p /tmp/cinestream_cloud
+          sudo mkdir -p /tmp/cinestream_cloud
+          sudo chmod -R 777 /tmp/cinestream_cloud
           docker run -d --name tg-bot-api -p 8081:8081 \
             -v /tmp/cinestream_cloud:/var/lib/telegram-bot-api \
             aiogram/telegram-bot-api --api-id=2040 --api-hash=b18441a1ff607e10a989891a5462e627 --local
           sleep 4
+          sudo chmod -R 777 /tmp/cinestream_cloud
           curl -s http://127.0.0.1:8081 || echo "Local server ready"
 
       - name: ⚡ Download Magnet at 10Gbps & Stream to Telegram
@@ -56,6 +58,7 @@ jobs:
           DOWNLOAD_DIR: "/tmp/cinestream_cloud"
           LOCAL_BOT_API: "http://127.0.0.1:8081"
         run: |
+          sudo chmod -R 777 /tmp/cinestream_cloud
           cat << 'PYEOF' > /tmp/cloud_engine.py
           import os
           import re
@@ -118,19 +121,27 @@ jobs:
               if not trans_bin:
                   return False
               print("🚀 Launching Transmission Engine (Native BitTorrent Swarm)...", flush=True)
+              try:
+                  subprocess.run(["sudo", "chmod", "-R", "777", output_dir], check=False)
+              except Exception:
+                  pass
               finish_script = "/tmp/trans_finish.sh"
               with open(finish_script, "w") as f:
-                  f.write("#!/bin/sh\nkillall transmission-cli 2>/dev/null || true\n")
+                  f.write("#!/bin/sh\nsleep 3\npkill -9 -f transmission-cli 2>/dev/null || true\n")
               os.chmod(finish_script, 0o755)
 
-              cmd = [trans_bin, "-w", output_dir, "-f", finish_script, magnet_or_torrent]
+              cmd = [trans_bin, "-w", output_dir, "--seedratio", "0", "-f", finish_script, magnet_or_torrent]
               try:
                   proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                   for line in iter(proc.stdout.readline, ""):
                       clean = line.strip()
-                      if clean and ("%" in clean or "Progress:" in clean or "Downloading" in clean):
+                      if clean and ("%" in clean or "Progress:" in clean or "Downloading" in clean or "dl from" in clean or "Verifying" in clean):
                           print(f"⚡ [Transmission] {clean}", flush=True)
                   proc.wait()
+                  try:
+                      subprocess.run(["sudo", "chmod", "-R", "777", output_dir], check=False)
+                  except Exception:
+                      pass
                   return True
               except Exception as e:
                   print(f"⚠️ Transmission note: {e}", flush=True)
@@ -169,6 +180,11 @@ jobs:
 
           def download_torrent(magnet_url: str, output_dir: str) -> Optional[str]:
               os.makedirs(output_dir, exist_ok=True)
+              try:
+                  subprocess.run(["sudo", "chmod", "-R", "777", output_dir], check=False)
+              except Exception:
+                  pass
+
               magnet_url = magnet_url.strip()
 
               if (magnet_url.startswith("http://") or magnet_url.startswith("https://")) and not magnet_url.endswith(".torrent") and "btcache" not in magnet_url:
@@ -199,12 +215,17 @@ jobs:
                   if v: return v
 
               print(f"🧲 Starting Aria2c 10Gbps Engine for: {target_source[:60]}...", flush=True)
+              try:
+                  subprocess.run(["sudo", "chmod", "-R", "777", output_dir], check=False)
+              except Exception:
+                  pass
               cmd = [
-                  "aria2c", "--enable-dht=true", "--dht-file-path=/tmp/aria2_dht.dat",
+                  "aria2c", "--enable-dht=true", "--follow-torrent=mem", "--seed-time=0",
+                  "--dht-file-path=/tmp/aria2_dht.dat",
                   "--dht-listen-port=6881-6999", "--listen-port=6881-6999",
                   "--dht-entry-point=dht.transmissionbt.com:6881",
                   "--peer-id-prefix=-TR3000-", "--user-agent=Transmission/3.00",
-                  "--bt-max-peers=120", "--seed-time=0", "--summary-interval=3",
+                  "--bt-max-peers=120", "--summary-interval=3",
                   "--dir", output_dir,
                   "--bt-tracker=" + ",".join(GLOBAL_TRACKERS),
                   target_source
@@ -218,6 +239,11 @@ jobs:
                   proc.wait()
               except Exception as e:
                   print(f"❌ Aria2c error: {e}", flush=True)
+
+              try:
+                  subprocess.run(["sudo", "chmod", "-R", "777", output_dir], check=False)
+              except Exception:
+                  pass
 
               return find_largest_video(output_dir)
 
