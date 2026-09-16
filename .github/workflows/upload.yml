@@ -38,8 +38,8 @@ jobs:
           import os, glob, asyncio, subprocess
           from telethon import TelegramClient
 
-          API_ID = 2040
-          API_HASH = "b18441a1ff607e10a989891a5462e627"
+          API_ID = 31518596
+          API_HASH = "450525f29be7392a388c0547e391360f"
           BOT_TOKEN = os.environ["BOT_TOKEN"]
           MOVIES_CHANNEL = int(os.environ["MOVIES_CHANNEL"])
           THUMBNAILS_CHANNEL = int(os.environ["THUMBNAILS_CHANNEL"])
