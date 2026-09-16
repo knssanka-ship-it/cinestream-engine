@@ -3,12 +3,14 @@ import uuid
 import logging
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
 from database import init_db, get_all_movies, get_movie_by_id, save_or_update_movie, delete_movie
 from telegram_service import test_bot_connection, get_file_download_url
+from telegram_streamer import stream_telegram_video_response
 from torrent_worker import process_movie_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -136,6 +138,54 @@ def check_movie_pipeline_status(movie_id: str):
 def remove_movie(movie_id: str):
     delete_movie(movie_id)
     return {"success": True, "message": f"Movie {movie_id} deleted"}
+
+@app.get("/api/stream/telegram/{message_id}")
+async def stream_telegram_by_id(message_id: int, request: Request):
+    """
+    Direct MTProto 206 chunked video streaming from Telegram channel.
+    Solves Telegram's 'Media is too big' web embed limitation for files up to 2GB!
+    """
+    return await stream_telegram_video_response(message_id, request)
+
+@app.get("/api/stream/movie/{movie_id}")
+async def stream_movie_media(movie_id: str, request: Request):
+    """
+    Stream resolution bridge for CineStream Android App.
+    Directs the client player to the fastest active stream source (FileStream CDN, Direct MP4, or Telegram MTProto).
+    """
+    movie = get_movie_by_id(movie_id)
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    # 1. Check for direct stream URL (e.g. from direct CDN / MP4)
+    direct_url = movie.get("direct_stream_url") or movie.get("video_url")
+    if direct_url and any(direct_url.lower().endswith(ext) for ext in [".mp4", ".mkv", ".m3u8", ".webm"]):
+        return RedirectResponse(url=direct_url, status_code=307)
+
+    # 2. Check for Telegram message ID for native MTProto streaming
+    tg_msg_id = movie.get("telegram_message_id")
+    if not tg_msg_id and movie.get("telegram_post_url"):
+        raw_post = str(movie.get("telegram_post_url"))
+        last_seg = raw_post.rstrip("/").split("/")[-1].split("?")[0]
+        if last_seg.isdigit():
+            tg_msg_id = last_seg
+
+    if tg_msg_id and str(tg_msg_id).isdigit():
+        return await stream_telegram_video_response(int(tg_msg_id), request)
+
+    # 3. Check for small Telegram bot file_id (< 20MB files)
+    tg_file_id = movie.get("telegram_file_id")
+    if tg_file_id:
+        cdn_url = get_file_download_url(tg_file_id)
+        if cdn_url:
+            return RedirectResponse(url=cdn_url, status_code=307)
+
+    # 4. Fallback to Telegram Web / Post URL
+    tg_post = movie.get("telegram_post_url") or movie.get("video_url")
+    if tg_post:
+        return RedirectResponse(url=tg_post, status_code=307)
+
+    return JSONResponse(status_code=404, content={"error": "No playable stream available for this movie"})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
