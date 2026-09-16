@@ -61,7 +61,7 @@ def parse_range_header(range_header: Optional[str], file_size: int) -> Tuple[int
 async def resolve_target_video_message(client: TelegramClient, message_id: int):
     """
     Finds the requested message, or gracefully discovers the latest video message in the channel.
-    Telegram Bots cannot call iter_messages (GetHistoryRequest), but can fetch by IDs (GetMessagesRequest).
+    Telegram Bots query message IDs directly via GetMessagesRequest.
     """
     entity = await get_channel_entity(client)
 
@@ -74,10 +74,9 @@ async def resolve_target_video_message(client: TelegramClient, message_id: int):
         except Exception as e:
             logger.warning(f"Error checking message id {message_id}: {e}")
 
-    # 2. Probe recent IDs (e.g. from 1 to 200 backwards or forwards)
-    # Check ids 1 to 100
+    # 2. Probe recent IDs backwards to discover latest uploaded video
     try:
-        probe_ids = list(range(100, 0, -1))
+        probe_ids = list(range(50, 0, -1))
         msgs = await client.get_messages(entity, ids=probe_ids)
         for m in msgs:
             if m and m.media:
@@ -100,9 +99,7 @@ async def list_channel_videos_info(limit: int = 20):
         entity = await get_channel_entity(client)
 
         results = []
-        # Bots cannot use iter_messages (GetHistoryRequest). Bots CAN query message IDs directly via GetMessagesRequest!
-        # Probe recent IDs:
-        probe_ids = list(range(1, 100))
+        probe_ids = list(range(1, 50))
         messages = await client.get_messages(entity, ids=probe_ids)
         for m in messages:
             if m and m.media:
@@ -127,12 +124,14 @@ async def stream_telegram_video_response(message_id: int, request: Request):
     """
     Streams large video file directly from Telegram Channel
     via MTProto chunk streaming with full HTTP Range (206 Partial Content) support.
+    Correctly aligns offsets to Telegram 4KB boundary and slices exact requested bytes
+    so ExoPlayer never encounters 'unexpected end of stream'.
     """
     client = await get_telegram_client()
     msg = await resolve_target_video_message(client, message_id)
 
     if not msg or not msg.media or not msg.file:
-        raise HTTPException(status_code=404, detail=f"No video file found in channel")
+        raise HTTPException(status_code=404, detail="No video file found in channel")
 
     file_size = msg.file.size
     mime_type = msg.file.mime_type or "video/mp4"
@@ -141,7 +140,6 @@ async def stream_telegram_video_response(message_id: int, request: Request):
     range_header = request.headers.get("range")
     start, end = parse_range_header(range_header, file_size)
     content_length = end - start + 1
-    chunk_size = 512 * 1024 # 512 KB chunks
 
     # Handle HEAD request
     if request.method == "HEAD":
@@ -156,16 +154,51 @@ async def stream_telegram_video_response(message_id: int, request: Request):
             media_type=mime_type
         )
 
+    # Telegram MTProto requires offsets to be aligned to a multiple of 4KB (4096 bytes)
+    ALIGNMENT = 4096
+    aligned_offset = (start // ALIGNMENT) * ALIGNMENT
+    skip_bytes = start - aligned_offset
+    bytes_needed = content_length + skip_bytes
+    chunk_size = 512 * 1024  # 512 KB transfer chunks
+
     async def video_chunk_generator():
+        bytes_sent = 0
+        current_skip = skip_bytes
         try:
-            async for chunk in client.iter_download(
+            async for raw_chunk in client.iter_download(
                 msg.media,
-                offset=start,
-                limit=content_length,
+                offset=aligned_offset,
+                limit=bytes_needed,
                 chunk_size=chunk_size,
                 request_size=chunk_size
             ):
-                yield chunk
+                if not raw_chunk:
+                    continue
+                
+                # If we need to skip leading bytes from the 4KB alignment
+                if current_skip > 0:
+                    if len(raw_chunk) <= current_skip:
+                        current_skip -= len(raw_chunk)
+                        continue
+                    else:
+                        raw_chunk = raw_chunk[current_skip:]
+                        current_skip = 0
+
+                # Determine how many bytes we still need to send
+                remaining_needed = content_length - bytes_sent
+                if remaining_needed <= 0:
+                    break
+
+                if len(raw_chunk) > remaining_needed:
+                    to_send = raw_chunk[:remaining_needed]
+                else:
+                    to_send = raw_chunk
+
+                bytes_sent += len(to_send)
+                yield to_send
+
+                if bytes_sent >= content_length:
+                    break
         except Exception as err:
             logger.warning(f"Streaming chunk notice for msg {msg.id}: {err}")
 
