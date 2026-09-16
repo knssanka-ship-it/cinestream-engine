@@ -1,7 +1,8 @@
 import os
 import re
 import logging
-from typing import Optional, Tuple
+import traceback
+from typing import Optional, Tuple, Any
 from fastapi import Request, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from telethon import TelegramClient
@@ -11,9 +12,15 @@ logger = logging.getLogger("telegram_streamer")
 API_ID = int(os.environ.get("TELEGRAM_API_ID", "2040"))
 API_HASH = os.environ.get("TELEGRAM_API_HASH", "b18441a1ff607e10a989891a5462e627")
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs")
-MOVIES_CHANNEL = os.environ.get("MOVIES_CHANNEL") or "cinestream_lk"
 
 _client: Optional[TelegramClient] = None
+
+def get_channel_identifier() -> Any:
+    raw = os.environ.get("MOVIES_CHANNEL") or "-1003984700777"
+    try:
+        return int(raw)
+    except ValueError:
+        return raw.lstrip("@")
 
 async def get_telegram_client() -> TelegramClient:
     global _client
@@ -24,6 +31,18 @@ async def get_telegram_client() -> TelegramClient:
     elif not _client.is_connected():
         await _client.connect()
     return _client
+
+async def get_channel_entity(client: TelegramClient):
+    channel_id = get_channel_identifier()
+    try:
+        return await client.get_entity(channel_id)
+    except Exception as e1:
+        logger.warning(f"Could not resolve channel {channel_id}: {e1}, trying @cinestream_lk")
+        try:
+            return await client.get_entity("cinestream_lk")
+        except Exception as e2:
+            logger.warning(f"Could not resolve @cinestream_lk: {e2}, trying -1003984700777")
+            return await client.get_entity(-1003984700777)
 
 def parse_range_header(range_header: Optional[str], file_size: int) -> Tuple[int, int]:
     """Parses standard HTTP Range header (e.g., 'bytes=0-1048575' or 'bytes=50000-')"""
@@ -43,17 +62,9 @@ async def resolve_target_video_message(client: TelegramClient, message_id: int):
     """
     Finds the requested message, or gracefully discovers the latest video message in the channel.
     """
-    # 1. Resolve channel entity by username or id
-    try:
-        entity = await client.get_entity("cinestream_lk")
-    except Exception:
-        try:
-            entity = await client.get_entity(int(MOVIES_CHANNEL))
-        except Exception as e:
-            logger.error(f"Cannot resolve channel {MOVIES_CHANNEL}: {e}")
-            raise HTTPException(status_code=500, detail=f"Channel resolution failed: {e}")
+    entity = await get_channel_entity(client)
 
-    # 2. Try specific message_id if provided
+    # 1. Try specific message_id if provided
     if message_id > 0:
         try:
             m = await client.get_messages(entity, ids=message_id)
@@ -64,42 +75,42 @@ async def resolve_target_video_message(client: TelegramClient, message_id: int):
         except Exception as e:
             logger.warning(f"Error checking message id {message_id}: {e}")
 
-    # 3. Fallback: Search latest video messages in channel
+    # 2. Fallback: Search latest video messages in channel
     logger.info("Auto-discovering latest video message in channel...")
     async for m in client.iter_messages(entity, limit=40):
         if m and m.media:
-            # Check if video document
             is_vid = bool(m.video or (m.file and "video" in (m.file.mime_type or "")))
             if is_vid:
                 logger.info(f"Discovered movie video in message id: {m.id}, size: {m.file.size}")
                 return m
 
-    # 4. Fallback: any media
-    async for m in client.iter_messages(entity, limit=10):
-        if m and m.media:
+    # 3. Fallback: any media document
+    async for m in client.iter_messages(entity, limit=15):
+        if m and m.media and m.file:
             return m
 
     return None
 
 async def list_channel_videos_info(limit: int = 20):
-    client = await get_telegram_client()
     try:
-        entity = await client.get_entity("cinestream_lk")
-    except Exception:
-        entity = await client.get_entity(int(MOVIES_CHANNEL))
+        client = await get_telegram_client()
+        entity = await get_channel_entity(client)
 
-    results = []
-    async for m in client.iter_messages(entity, limit=limit):
-        if m and m.media:
-            results.append({
-                "id": m.id,
-                "text": m.message or "",
-                "file_name": m.file.name if m.file else None,
-                "file_size": m.file.size if m.file else 0,
-                "mime_type": m.file.mime_type if m.file else None,
-                "is_video": bool(m.video or (m.file and "video" in (m.file.mime_type or "")))
-            })
-    return results
+        results = []
+        async for m in client.iter_messages(entity, limit=limit):
+            if m and m.media:
+                results.append({
+                    "id": m.id,
+                    "text": m.message or "",
+                    "file_name": m.file.name if m.file else None,
+                    "file_size": m.file.size if m.file else 0,
+                    "mime_type": m.file.mime_type if m.file else None,
+                    "is_video": bool(m.video or (m.file and "video" in (m.file.mime_type or "")))
+                })
+        return results
+    except Exception as e:
+        logger.error(f"Error listing videos: {e}")
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 async def stream_telegram_video_response(message_id: int, request: Request):
     """
