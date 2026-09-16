@@ -2,7 +2,7 @@ import os
 import re
 import logging
 from typing import Optional, Tuple
-from fastapi import Request, HTTPException
+from fastapi import Request, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from telethon import TelegramClient
 
@@ -11,7 +11,7 @@ logger = logging.getLogger("telegram_streamer")
 API_ID = int(os.environ.get("TELEGRAM_API_ID", "2040"))
 API_HASH = os.environ.get("TELEGRAM_API_HASH", "b18441a1ff607e10a989891a5462e627")
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs")
-MOVIES_CHANNEL = int(os.environ.get("MOVIES_CHANNEL") or os.environ.get("MOVIES_CHANNEL_ID", "-1003984700777"))
+MOVIES_CHANNEL = os.environ.get("MOVIES_CHANNEL") or "cinestream_lk"
 
 _client: Optional[TelegramClient] = None
 
@@ -39,30 +39,100 @@ def parse_range_header(range_header: Optional[str], file_size: int) -> Tuple[int
     end = max(start, min(end, file_size - 1))
     return start, end
 
-async def stream_telegram_video_response(message_id: int, request: Request, channel_id: int = MOVIES_CHANNEL):
+async def resolve_target_video_message(client: TelegramClient, message_id: int):
     """
-    Streams large video file (> 20MB, up to 2GB) directly from Telegram Channel
-    via MTProto chunk streaming with full HTTP Range (206 Partial Content) support.
-    Solves Telegram's 'Media is too big' web limitation!
+    Finds the requested message, or gracefully discovers the latest video message in the channel.
     """
+    # 1. Resolve channel entity by username or id
+    try:
+        entity = await client.get_entity("cinestream_lk")
+    except Exception:
+        try:
+            entity = await client.get_entity(int(MOVIES_CHANNEL))
+        except Exception as e:
+            logger.error(f"Cannot resolve channel {MOVIES_CHANNEL}: {e}")
+            raise HTTPException(status_code=500, detail=f"Channel resolution failed: {e}")
+
+    # 2. Try specific message_id if provided
+    if message_id > 0:
+        try:
+            m = await client.get_messages(entity, ids=message_id)
+            if m and m.media and (m.video or (m.file and "video" in (m.file.mime_type or ""))):
+                return m
+            elif m and m.media:
+                return m
+        except Exception as e:
+            logger.warning(f"Error checking message id {message_id}: {e}")
+
+    # 3. Fallback: Search latest video messages in channel
+    logger.info("Auto-discovering latest video message in channel...")
+    async for m in client.iter_messages(entity, limit=40):
+        if m and m.media:
+            # Check if video document
+            is_vid = bool(m.video or (m.file and "video" in (m.file.mime_type or "")))
+            if is_vid:
+                logger.info(f"Discovered movie video in message id: {m.id}, size: {m.file.size}")
+                return m
+
+    # 4. Fallback: any media
+    async for m in client.iter_messages(entity, limit=10):
+        if m and m.media:
+            return m
+
+    return None
+
+async def list_channel_videos_info(limit: int = 20):
     client = await get_telegram_client()
     try:
-        msg = await client.get_messages(channel_id, ids=message_id)
-    except Exception as e:
-        logger.error(f"Failed to fetch Telegram message {message_id}: {e}")
-        raise HTTPException(status_code=404, detail=f"Message {message_id} not found: {e}")
+        entity = await client.get_entity("cinestream_lk")
+    except Exception:
+        entity = await client.get_entity(int(MOVIES_CHANNEL))
 
-    if not msg or not msg.media:
-        raise HTTPException(status_code=404, detail=f"No media found in message {message_id}")
+    results = []
+    async for m in client.iter_messages(entity, limit=limit):
+        if m and m.media:
+            results.append({
+                "id": m.id,
+                "text": m.message or "",
+                "file_name": m.file.name if m.file else None,
+                "file_size": m.file.size if m.file else 0,
+                "mime_type": m.file.mime_type if m.file else None,
+                "is_video": bool(m.video or (m.file and "video" in (m.file.mime_type or "")))
+            })
+    return results
+
+async def stream_telegram_video_response(message_id: int, request: Request):
+    """
+    Streams large video file directly from Telegram Channel
+    via MTProto chunk streaming with full HTTP Range (206 Partial Content) support.
+    """
+    client = await get_telegram_client()
+    msg = await resolve_target_video_message(client, message_id)
+
+    if not msg or not msg.media or not msg.file:
+        raise HTTPException(status_code=404, detail=f"No video file found in channel")
 
     file_size = msg.file.size
     mime_type = msg.file.mime_type or "video/mp4"
-    file_name = msg.file.name or f"movie_{message_id}.mp4"
+    file_name = msg.file.name or f"movie_{msg.id}.mp4"
 
     range_header = request.headers.get("range")
     start, end = parse_range_header(range_header, file_size)
     content_length = end - start + 1
-    chunk_size = 512 * 1024 # 512 KB chunks for smooth playback
+    chunk_size = 512 * 1024 # 512 KB chunks
+
+    # Handle HEAD request
+    if request.method == "HEAD":
+        return Response(
+            status_code=200,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+                "Content-Type": mime_type,
+                "Access-Control-Allow-Origin": "*",
+            },
+            media_type=mime_type
+        )
 
     async def video_chunk_generator():
         try:
@@ -75,7 +145,7 @@ async def stream_telegram_video_response(message_id: int, request: Request, chan
             ):
                 yield chunk
         except Exception as err:
-            logger.warning(f"Streaming chunk notice for msg {message_id}: {err}")
+            logger.warning(f"Streaming chunk notice for msg {msg.id}: {err}")
 
     headers = {
         "Content-Range": f"bytes {start}-{end}/{file_size}",
