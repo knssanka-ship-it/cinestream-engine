@@ -156,8 +156,15 @@ def download_media_source(source_url: str, output_dir: str, timeout_seconds: int
     
     # Compress/Optimize the video for Telegram Web Embed
     optimized_file = os.path.join(output_dir, "optimized_movie.mp4")
+    orig_size = os.path.getsize(largest_file)
     if compress_video_for_telegram(largest_file, optimized_file):
-        largest_file = optimized_file
+        if os.path.exists(optimized_file):
+            opt_size = os.path.getsize(optimized_file)
+            if opt_size > 0 and opt_size < orig_size:
+                print(f"✅ [Optimizer] Optimized file is smaller ({opt_size / (1024*1024):.2f} MB vs {orig_size / (1024*1024):.2f} MB). Using optimized file.", flush=True)
+                largest_file = optimized_file
+            else:
+                print(f"ℹ️ [Optimizer] Optimized file size is not smaller. Keeping original file.", flush=True)
 
     size_mb = os.path.getsize(largest_file) / (1024 * 1024)
     print(f"🎯 Ready File: {os.path.basename(largest_file)} ({size_mb:.2f} MB)", flush=True)
