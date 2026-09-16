@@ -5,109 +5,162 @@ import logging
 import shutil
 import time
 import sys
-import requests
 from typing import Optional, Dict, Any
 from telegram_service import (
     upload_thumbnail_to_channel,
     upload_video_to_movies_channel,
-    upload_subtitle_to_channel
+    upload_subtitle_to_channel,
+    get_file_download_url
 )
-from database import save_or_update_movie
+from database import save_or_update_movie, update_movie_status
 
 logger = logging.getLogger("cinestream_torrent")
 
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/tmp/cinestream_downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# YTS & Global Live Trackers
-EXTRA_TRACKERS = (
-    "&tr=udp://tracker.opentrackr.org:1337/announce"
-    "&tr=udp://open.tracker.cl:1337/announce"
-    "&tr=udp://open.demonii.com:1337/announce"
-    "&tr=udp://tracker.openbittorrent.com:80"
-    "&tr=udp://tracker.coppersurfer.tk:6969"
-    "&tr=udp://glotorrents.pw:6969/announce"
-    "&tr=udp://p4p.arenabg.com:1337"
-    "&tr=udp://tracker.leechers-paradise.org:6969"
-)
+# Top 20 Global Trackers
+GLOBAL_TRACKERS = [
+    "http://tracker.opentrackr.org:1337/announce",
+    "http://open.acgnxtracker.com:80/announce",
+    "http://tracker.bt4g.com:2095/announce",
+    "https://tracker.tamersunion.org:443/announce",
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.tracker.cl:1337/announce",
+    "udp://opentracker.i2p.rocks:6969/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://9.rarbg.to:2710/announce",
+    "udp://p4p.arenabg.com:1337/announce"
+]
+
+def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
+    """
+    Compresses and transcodes the downloaded video using FFmpeg 
+    so that Telegram Web Embed Player can load it smoothly without 'Media is too big' error.
+    """
+    print(f"🎬 [FFmpeg] Starting video optimization for Telegram...", flush=True)
+    # H.264 video codec and AAC audio codec, scaled to 720p with optimized bitrate for web streaming
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "26",
+        "-vf", "scale=-2:700",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1024 * 1024:
+            print(f"✅ [FFmpeg] Video successfully optimized!", flush=True)
+            return True
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ [FFmpeg] Optimization warning/error: {e}", flush=True)
+    except Exception as ex:
+        print(f"⚠️ [FFmpeg] Unexpected error: {ex}", flush=True)
+    
+    return False
 
 def download_media_source(source_url: str, output_dir: str, timeout_seconds: int = 1800) -> Optional[str]:
+    """
+    Downloads Torrent with strict 512MB RAM preservation.
+    Writes directly to disk scratch space without buffering into RAM.
+    """
     os.makedirs(output_dir, exist_ok=True)
     
-    # 1. YouTube Video Support (yt-dlp)
-    if "youtube.com" in source_url or "youtu.be" in source_url:
-        print(f"🎬 [YOUTUBE DOWNLOAD] Fetching YouTube Video via yt-dlp...", flush=True)
-        out_tmpl = os.path.join(output_dir, "movie.%(ext)s")
-        cmd = ["yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "-o", out_tmpl, source_url]
+    # 1. Direct HTTP/HTTPS Video URL Support
+    if source_url.startswith("http://") or source_url.startswith("https://"):
+        print(f"🚀 [DIRECT DOWNLOAD] Fetching video from URL...", flush=True)
+        out_file = os.path.join(output_dir, "movie.mp4")
+        cmd = ["curl", "-L", "-o", out_file, source_url]
         try:
             subprocess.run(cmd, timeout=timeout_seconds, check=True)
+            if os.path.exists(out_file) and os.path.getsize(out_file) > 1024 * 1024:
+                return out_file
         except Exception as e:
-            print(f"⚠️ yt-dlp error: {e}", flush=True)
+            print(f"⚠️ Direct download notice: {e}", flush=True)
 
-    # 2. Direct HTTP/HTTPS Video Link
-    elif (source_url.startswith("http://") or source_url.startswith("https://")) and not source_url.startswith("magnet:"):
-        print(f"🚀 [DIRECT DOWNLOAD] Fetching direct video file...", flush=True)
-        out_file = os.path.join(output_dir, "movie.mp4")
-        try:
-            with requests.get(source_url, stream=True, timeout=60) as r:
-                r.raise_for_status()
-                with open(out_file, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=2*1024*1024):
-                        if chunk:
-                            f.write(chunk)
-        except Exception as e:
-            print(f"⚠️ Direct download error: {e}", flush=True)
+    # 2. Torrent / Magnet Download (Strict RAM limit < 32MB)
+    print(f"🚀 [ARIA2C START] Downloading: {source_url[:75]}...", flush=True)
+    trackers_param = "--bt-tracker=" + ",".join(GLOBAL_TRACKERS)
+    
+    cmd = [
+        "aria2c",
+        "--enable-dht=true",
+        "--enable-dht6=false",
+        "--dht-entry-point=dht.transmissionbt.com:6881",
+        "--dht-entry-point=router.bittorrent.com:6881",
+        "--peer-id-prefix=-TR3000-",
+        "--user-agent=Transmission/3.00",
+        "--enable-peer-exchange=true",
+        "--bt-max-peers=80",
+        "--bt-request-peer-speed-limit=0",
+        "--file-allocation=none",
+        "--disk-cache=16M",
+        "--max-connection-per-server=8",
+        "--split=8",
+        "--seed-time=0",
+        "--summary-interval=2",
+        "--listen-port=6881-6999",
+        "--dht-listen-port=6881-6999",
+        "--follow-torrent=mem",
+        "--dir", output_dir,
+        trackers_param,
+        source_url
+    ]
 
-    # 3. Magnet Torrent Download
-    elif source_url.startswith("magnet:?"):
-        print(f"🧲 [TORRENT DOWNLOAD] Initiating Torrent Download: {source_url[:70]}...", flush=True)
-        full_magnet = source_url + EXTRA_TRACKERS if not "&tr=" in source_url else source_url
-        cmd = [
-            "aria2c",
-            "--enable-dht=true",
-            "--bt-enable-lpd=true",
-            "--enable-peer-exchange=true",
-            "--bt-max-peers=120",
-            "--file-allocation=none",
-            "--seed-time=0",
-            "--summary-interval=3",
-            "--dir", output_dir,
-            full_magnet
-        ]
-        try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-            start_time = time.time()
-            for line in iter(process.stdout.readline, ""):
-                clean_line = line.strip()
-                if clean_line:
-                    if "%" in clean_line or "DL:" in clean_line:
-                        print(f"⚡ [Torrent Live] {clean_line}", flush=True)
-                    elif "FILE:" in clean_line or "Complete" in clean_line:
-                        print(f"📦 {clean_line}", flush=True)
-                    sys.stdout.flush()
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
 
-                if time.time() - start_time > timeout_seconds:
-                    process.kill()
-                    print("❌ Torrent download timed out.", flush=True)
-                    break
-            process.stdout.close()
-            process.wait()
-        except Exception as e:
-            print(f"⚠️ Torrent engine error: {e}", flush=True)
+        start_time = time.time()
+        for line in iter(process.stdout.readline, ""):
+            clean_line = line.strip()
+            if clean_line:
+                if "%" in clean_line or "DL:" in clean_line or "ETA" in clean_line:
+                    print(f"⚡ [Torrent Live] {clean_line}", flush=True)
+                elif "FILE:" in clean_line or "Download complete" in clean_line:
+                    print(f"📦 {clean_line}", flush=True)
+                sys.stdout.flush()
 
-    # Find largest video file
+            if time.time() - start_time > timeout_seconds:
+                process.kill()
+                print("❌ [aria2c] Download timed out!", flush=True)
+                return None
+
+        process.stdout.close()
+        process.wait()
+
+    except Exception as e:
+        print(f"❌ [aria2c] Execution error: {e}", flush=True)
+
+    # Search for downloaded video file
     video_extensions = ("*.mp4", "*.mkv", "*.avi", "*.mov", "*.webm")
     media_files = []
     for ext in video_extensions:
         media_files.extend(glob.glob(os.path.join(output_dir, "**", ext), recursive=True))
 
     if not media_files:
-        print("❌ No video files found in output folder.", flush=True)
+        print("❌ No video files found in download folder.", flush=True)
         return None
 
     largest_file = max(media_files, key=os.path.getsize)
+    
+    # Compress/Optimize the video for Telegram Web Embed
+    optimized_file = os.path.join(output_dir, "optimized_movie.mp4")
+    if compress_video_for_telegram(largest_file, optimized_file):
+        largest_file = optimized_file
+
     size_mb = os.path.getsize(largest_file) / (1024 * 1024)
-    print(f"🎯 Download Complete! File: {os.path.basename(largest_file)} ({size_mb:.2f} MB)", flush=True)
+    print(f"🎯 Ready File: {os.path.basename(largest_file)} ({size_mb:.2f} MB)", flush=True)
     return largest_file
 
 def process_movie_pipeline(movie_data: Dict[str, Any]):
@@ -128,7 +181,8 @@ def process_movie_pipeline(movie_data: Dict[str, Any]):
         print(f"🎬 [PIPELINE START] Processing Movie: '{title}'", flush=True)
         print(f"==================================================", flush=True)
 
-        # 1. Upload Poster Thumbnail to Channel
+        # 1. Upload Thumbnail to Channel
+        thumb_file_id = None
         if poster_url:
             thumb_caption = (
                 f"🎬 <b>{title}</b> ({movie_data.get('year', 2024)})\n\n"
@@ -137,11 +191,11 @@ def process_movie_pipeline(movie_data: Dict[str, Any]):
                 f"📖 <i>{synopsis[:250]}</i>"
             )
             print(f"🖼️ Uploading Thumbnail for '{title}'...", flush=True)
-            thumb_msg_id = upload_thumbnail_to_channel(poster_url, thumb_caption)
-            if thumb_msg_id:
-                movie_data["telegram_thumbnail_file_id"] = thumb_msg_id
+            thumb_file_id = upload_thumbnail_to_channel(poster_url, thumb_caption)
+            if thumb_file_id:
+                movie_data["telegram_thumbnail_file_id"] = thumb_file_id
                 save_or_update_movie(movie_data)
-                print(f"✅ Thumbnail Uploaded Successfully!", flush=True)
+                print(f"✅ Thumbnail Uploaded Successfully! ID: {thumb_file_id}", flush=True)
 
         # 2. Upload Subtitle (.srt)
         if sub_content and has_sinhala_sub:
@@ -154,15 +208,15 @@ def process_movie_pipeline(movie_data: Dict[str, Any]):
             except Exception as se:
                 print(f"⚠️ Subtitle notice: {se}", flush=True)
 
-        # 3. Download Movie Video (Torrent / YouTube / Direct)
+        # 3. Download Torrent / Video Media
         video_file_path = None
         if magnet_url:
             video_file_path = download_media_source(magnet_url, task_dir)
 
-        # 4. Upload Movie to Telegram Movies Channel (-1003984700777)
+        # 4. Stream Video directly to Telegram Channel
         if video_file_path and os.path.exists(video_file_path):
             file_size_mb = os.path.getsize(video_file_path) / (1024 * 1024)
-            print(f"🚀 Uploading {file_size_mb:.2f} MB Movie to Telegram Channel (-1003984700777)...", flush=True)
+            print(f"🚀 Streaming {file_size_mb:.2f} MB Movie to Telegram Channel...", flush=True)
 
             v_caption = (
                 f"🎥 <b>{title} ({movie_data.get('year', 2024)})</b> Full Movie\n\n"
@@ -173,22 +227,33 @@ def process_movie_pipeline(movie_data: Dict[str, Any]):
 
             upload_res = upload_video_to_movies_channel(video_file_path, v_caption)
             if upload_res:
-                movie_data["telegram_file_id"] = upload_res.get("file_id")
-                movie_data["telegram_message_id"] = upload_res.get("message_id")
+                v_file_id = upload_res.get("file_id")
+                movie_data["telegram_file_id"] = v_file_id
+                upload_msg_id = upload_res.get("message_id")
+                movie_data["telegram_message_id"] = upload_msg_id
+                if upload_msg_id:
+                    movie_data["telegram_post_url"] = f"https://t.me/cinestream_lk/{upload_msg_id}"
+                    if not movie_data.get("video_url") or "t.me" in movie_data.get("video_url", ""):
+                        movie_data["video_url"] = f"https://t.me/cinestream_lk/{upload_msg_id}"
+                stream_link = get_file_download_url(v_file_id)
+                if stream_link:
+                    movie_data["direct_stream_url"] = stream_link
                 movie_data["status"] = "ready"
                 save_or_update_movie(movie_data)
-                print(f"🎉 Movie Successfully Uploaded to Telegram!", flush=True)
+                print(f"🎉 Movie Successfully Uploaded to Telegram! File ID: {v_file_id}", flush=True)
             else:
                 movie_data["status"] = "failed"
                 save_or_update_movie(movie_data)
 
+            # Free up scratch disk immediately
             shutil.rmtree(task_dir, ignore_errors=True)
+            print(f"🧹 Temporary storage cleaned.", flush=True)
         else:
             print(f"⚠️ Video file could not be downloaded.", flush=True)
             movie_data["status"] = "ready"
             save_or_update_movie(movie_data)
 
     except Exception as e:
-        print(f"💥 [CRITICAL ERROR] {e}", flush=True)
-        movie_data["status"] = "failed"
-        save_or_update_movie(movie_data)
+            print(f"💥 [CRITICAL PIPELINE ERROR] {e}", flush=True)
+            movie_data["status"] = "failed"
+            save_or_update_movie(movie_data)
