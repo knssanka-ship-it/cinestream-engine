@@ -9,8 +9,8 @@ from telethon import TelegramClient
 
 logger = logging.getLogger("telegram_streamer")
 
-API_ID = int(os.environ.get("TELEGRAM_API_ID", "2040"))
-API_HASH = os.environ.get("TELEGRAM_API_HASH", "b18441a1ff607e10a989891a5462e627")
+API_ID = int(os.environ.get("TELEGRAM_API_ID", "31518596"))
+API_HASH = os.environ.get("TELEGRAM_API_HASH", "450525f29be7392a388c0547e391360f")
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs")
 
 _client: Optional[TelegramClient] = None
