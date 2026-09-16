@@ -139,13 +139,28 @@ def remove_movie(movie_id: str):
     delete_movie(movie_id)
     return {"success": True, "message": f"Movie {movie_id} deleted"}
 
-@app.get("/api/stream/telegram/{message_id}")
+@app.api_route("/api/stream/telegram/{message_id}", methods=["GET", "HEAD"])
 async def stream_telegram_by_id(message_id: int, request: Request):
     """
     Direct MTProto 206 chunked video streaming from Telegram channel.
     Solves Telegram's 'Media is too big' web embed limitation for files up to 2GB!
     """
     return await stream_telegram_video_response(message_id, request)
+
+@app.api_route("/api/stream/latest", methods=["GET", "HEAD"])
+async def stream_latest_channel_video(request: Request):
+    """
+    Directly streams the most recent video uploaded to the channel.
+    """
+    return await stream_telegram_video_response(0, request)
+
+@app.get("/api/telegram/videos")
+async def get_telegram_videos(limit: int = 20):
+    """
+    Lists recent video files available in the channel.
+    """
+    from telegram_streamer import list_channel_videos_info
+    return await list_channel_videos_info(limit)
 
 @app.get("/api/stream/movie/{movie_id}")
 async def stream_movie_media(movie_id: str, request: Request):
