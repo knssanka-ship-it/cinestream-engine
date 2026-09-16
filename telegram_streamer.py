@@ -61,6 +61,7 @@ def parse_range_header(range_header: Optional[str], file_size: int) -> Tuple[int
 async def resolve_target_video_message(client: TelegramClient, message_id: int):
     """
     Finds the requested message, or gracefully discovers the latest video message in the channel.
+    Telegram Bots cannot call iter_messages (GetHistoryRequest), but can fetch by IDs (GetMessagesRequest).
     """
     entity = await get_channel_entity(client)
 
@@ -68,26 +69,28 @@ async def resolve_target_video_message(client: TelegramClient, message_id: int):
     if message_id > 0:
         try:
             m = await client.get_messages(entity, ids=message_id)
-            if m and m.media and (m.video or (m.file and "video" in (m.file.mime_type or ""))):
-                return m
-            elif m and m.media:
+            if m and m.media:
                 return m
         except Exception as e:
             logger.warning(f"Error checking message id {message_id}: {e}")
 
-    # 2. Fallback: Search latest video messages in channel
-    logger.info("Auto-discovering latest video message in channel...")
-    async for m in client.iter_messages(entity, limit=40):
-        if m and m.media:
-            is_vid = bool(m.video or (m.file and "video" in (m.file.mime_type or "")))
-            if is_vid:
-                logger.info(f"Discovered movie video in message id: {m.id}, size: {m.file.size}")
+    # 2. Probe recent IDs (e.g. from 1 to 200 backwards or forwards)
+    # Check ids 1 to 100
+    try:
+        probe_ids = list(range(100, 0, -1))
+        msgs = await client.get_messages(entity, ids=probe_ids)
+        for m in msgs:
+            if m and m.media:
+                is_vid = bool(m.video or (m.file and "video" in (m.file.mime_type or "")))
+                if is_vid:
+                    logger.info(f"Discovered movie video in message id: {m.id}, size: {m.file.size}")
+                    return m
+        # If no video found, any media
+        for m in msgs:
+            if m and m.media and m.file:
                 return m
-
-    # 3. Fallback: any media document
-    async for m in client.iter_messages(entity, limit=15):
-        if m and m.media and m.file:
-            return m
+    except Exception as e:
+        logger.warning(f"Probe recent IDs error: {e}")
 
     return None
 
@@ -97,7 +100,11 @@ async def list_channel_videos_info(limit: int = 20):
         entity = await get_channel_entity(client)
 
         results = []
-        async for m in client.iter_messages(entity, limit=limit):
+        # Bots cannot use iter_messages (GetHistoryRequest). Bots CAN query message IDs directly via GetMessagesRequest!
+        # Probe recent IDs:
+        probe_ids = list(range(1, 100))
+        messages = await client.get_messages(entity, ids=probe_ids)
+        for m in messages:
             if m and m.media:
                 results.append({
                     "id": m.id,
@@ -107,7 +114,11 @@ async def list_channel_videos_info(limit: int = 20):
                     "mime_type": m.file.mime_type if m.file else None,
                     "is_video": bool(m.video or (m.file and "video" in (m.file.mime_type or "")))
                 })
-        return results
+        return {
+            "entity": str(entity.title if hasattr(entity, "title") else entity),
+            "count": len(results),
+            "videos": results
+        }
     except Exception as e:
         logger.error(f"Error listing videos: {e}")
         return {"error": str(e), "traceback": traceback.format_exc()}
