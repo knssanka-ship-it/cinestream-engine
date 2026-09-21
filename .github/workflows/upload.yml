@@ -35,7 +35,7 @@ jobs:
           POSTER_URL: "${{ github.event.inputs.poster }}"
         run: |
           cat << 'EOF' > uploader.py
-          import os, glob, asyncio, subprocess, zipfile
+          import os, glob, asyncio, subprocess, zipfile, requests
           from telethon import TelegramClient
 
           API_ID = 31518596
@@ -43,7 +43,7 @@ jobs:
           BOT_TOKEN = os.environ["BOT_TOKEN"]
           MOVIES_CHANNEL = int(os.environ["MOVIES_CHANNEL"])
           THUMBNAILS_CHANNEL = int(os.environ["THUMBNAILS_CHANNEL"])
-          TITLE = os.environ["MOVIE_TITLE"]
+          TITLE = os.environ["MOVIE_TITLE"].strip()
           URI = os.environ["DOWNLOAD_URL"].strip()
           POSTER = os.environ.get("POSTER_URL", "").strip()
 
@@ -76,7 +76,6 @@ jobs:
                   full_uri
               ]
           else:
-              # Direct HTTP / HTTPS / Seedr link
               print("⚡ Detected Direct Link (Seedr / Web URL). Downloading with 16 connections...")
               cmd = [
                   "aria2c",
@@ -87,7 +86,6 @@ jobs:
                   f"--dir={work_dir}",
                   URI
               ]
-
           subprocess.run(cmd)
 
           # Auto-extract any zip files if present
@@ -133,7 +131,7 @@ jobs:
                       pct = (current / total) * 100
                       print(f"\r⚡ Upload: {pct:.1f}% ({current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB)", end="")
 
-                  await client.send_file(
+                  sent_msg = await client.send_file(
                       MOVIES_CHANNEL,
                       m_file,
                       caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
@@ -141,7 +139,36 @@ jobs:
                       supports_streaming=True,
                       progress_callback=progress
                   )
-                  print("\n\n🎉 සාර්ථකයි! සම්පූර්ණ චිත්‍රපටයම Telegram Channel එකට Upload විය!")
+                  print(f"\n\n🎉 සාර්ථකයි! සම්පූර්ණ චිත්‍රපටයම Telegram Channel එකට Upload විය! (Message ID: {sent_msg.id})")
+
+                  # 🔥 AUTOMATIC FIREBASE REALTIME DATABASE SYNC
+                  try:
+                      fb_url = "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app/movies.json"
+                      res = requests.get(fb_url, timeout=10)
+                      if res.status_code == 200 and res.json():
+                          movies_dict = res.json()
+                          matched_key = None
+                          clean_title = TITLE.lower()
+                          for k, v in movies_dict.items():
+                              if isinstance(v, dict):
+                                  m_title = (v.get("title") or "").strip().lower()
+                                  if m_title and (m_title in clean_title or clean_title in m_title):
+                                      matched_key = k
+                                      break
+
+                          if matched_key:
+                              patch_url = f"https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app/movies/{matched_key}.json"
+                              patch_payload = {
+                                  "telegramMessageId": str(sent_msg.id),
+                                  "directStreamUrl": f"https://sinhalahub-backend.fly.dev/stream/{sent_msg.id}",
+                                  "telegramPostUrl": f"https://t.me/cinestream_lk/{sent_msg.id}"
+                              }
+                              p_res = requests.patch(patch_url, json=patch_payload, timeout=10)
+                              print(f"✅ Firebase Realtime Database Updated automatically! Key: {matched_key}, Status: {p_res.status_code}")
+                          else:
+                              print(f"ℹ️ No matching title in Firebase found for {TITLE}")
+                  except Exception as fbe:
+                      print(f"⚠️ Firebase update exception: {fbe}")
               else:
                   print("❌ No video file found.")
 
