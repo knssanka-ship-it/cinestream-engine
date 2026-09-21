@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       title:
-        description: 'Movie Title (චිත්‍රපටයේ නම)'
+        description: 'Media Title'
         required: true
-        default: 'Mutiny (2026)'
+        default: 'Media File'
       magnet:
-        description: 'Torrent Magnet Link'
+        description: 'Download Link'
         required: true
       poster:
-        description: 'Poster Image URL (පෝස්ටරය)'
+        description: 'Poster Image URL'
         required: false
         default: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=800'
 
@@ -19,22 +19,22 @@ jobs:
   cloud_download_and_upload:
     runs-on: ubuntu-latest
     steps:
-      - name: 🛠️ Setup Fast Engines
+      - name: Setup Tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y aria2 ffmpeg
+          sudo apt-get install -y aria2
           pip install telethon cryptg requests
 
-      - name: 🚀 Torrent Download & Telegram 2GB Upload
+      - name: Process Media Download & Upload
         env:
           BOT_TOKEN: "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs"
           MOVIES_CHANNEL: "-1003984700777"
           THUMBNAILS_CHANNEL: "-1003771325554"
-          MOVIE_TITLE: "${{ github.event.inputs.title }}"
-          MAGNET_LINK: "${{ github.event.inputs.magnet }}"
+          MEDIA_TITLE: "${{ github.event.inputs.title }}"
+          DOWNLOAD_URI: "${{ github.event.inputs.magnet }}"
           POSTER_URL: "${{ github.event.inputs.poster }}"
         run: |
-          cat << EOF > uploader.py
+          cat << 'EOF' > process_upload.py
           import os, glob, asyncio, subprocess, sys
           from telethon import TelegramClient
 
@@ -43,89 +43,68 @@ jobs:
           BOT_TOKEN = os.environ["BOT_TOKEN"]
           MOVIES_CHANNEL = int(os.environ["MOVIES_CHANNEL"])
           THUMBNAILS_CHANNEL = int(os.environ["THUMBNAILS_CHANNEL"])
-          TITLE = os.environ["MOVIE_TITLE"]
-          MAGNET = os.environ["MAGNET_LINK"].strip()
+          TITLE = os.environ["MEDIA_TITLE"]
+          URI = os.environ["DOWNLOAD_URI"].strip()
           POSTER = os.environ.get("POSTER_URL", "").strip()
 
-          print(f"🎬 [CLOUD 10Gbps] Processing: '{TITLE}'...")
-          os.makedirs("/tmp/movie_temp", exist_ok=True)
+          work_dir = "/tmp/media_temp"
+          os.makedirs(work_dir, exist_ok=True)
 
-          # High Speed Global Trackers (UDP + HTTP) to bypass ISP/Cloud firewall
-          trackers = [
-              "udp://tracker.opentrackr.org:1337/announce",
-              "udp://open.tracker.cl:1337/announce",
-              "udp://tracker.openbittorrent.com:6969/announce",
-              "http://tracker.opentrackr.org:1337/announce",
-              "http://tracker.openbittorrent.com:80/announce",
-              "https://tracker.tamersunion.org:443/announce",
-              "udp://opentracker.i2p.rocks:6969/announce",
-              "udp://open.stealth.si:80/announce"
-          ]
-          tracker_str = "".join(f"&tr={t}" for t in trackers)
-          full_magnet = MAGNET + tracker_str if not "&tr=" in MAGNET else MAGNET
-
-          # Download using Aria2 multi-connection with optimized flags
+          print(f"Starting downloader for: {TITLE}")
           cmd = [
               "aria2c",
               "--enable-dht=true",
-              "--dht-listen-port=6881",
               "--enable-peer-exchange=true",
-              "--bt-enable-lpd=true",
-              "--bt-max-peers=150",
-              "--bt-request-peer-speed-limit=50M",
-              "--file-allocation=none",
               "--seed-time=0",
-              "--bt-stop-timeout=300",
-              "--summary-interval=5",
-              "--dir=/tmp/movie_temp",
-              full_magnet
+              "--summary-interval=10",
+              f"--dir={work_dir}",
+              URI
           ]
-          print("⚡ Starting aria2c with cloud-optimized trackers...")
           subprocess.run(cmd)
 
-          # Telethon 2GB MTProto Cloud Upload
-          async def upload_to_telegram():
-              client = TelegramClient('gh_cloud_session', API_ID, API_HASH)
+          async def run_uploader():
+              client = TelegramClient("media_session", API_ID, API_HASH)
               await client.start(bot_token=BOT_TOKEN)
 
-              # Upload Thumbnail
               if POSTER:
-                  print("🖼️ Uploading Poster...")
                   try:
                       await client.send_file(
                           THUMBNAILS_CHANNEL,
                           POSTER,
-                          caption=f"🎬 <b>{TITLE}</b>\n🇱🇰 සිංහල උපසිරැසි සමඟින්",
-                          parse_mode='html'
+                          caption=f"🎬 <b>{TITLE}</b>",
+                          parse_mode="html"
                       )
-                  except Exception as pe:
-                      print(f"Notice on poster: {pe}")
+                  except Exception as e:
+                      print(f"Poster upload note: {e}")
 
-              # Find Video file
-              v_files = glob.glob("/tmp/movie_temp/**/*.mp4", recursive=True) + glob.glob("/tmp/movie_temp/**/*.mkv", recursive=True)
-              if v_files:
-                  m_file = max(v_files, key=os.path.getsize)
-                  size_mb = os.path.getsize(m_file) / (1024 * 1024)
-                  print(f"🚀 Uploading {size_mb:.2f} MB Movie directly to Telegram Channel...")
+              extensions = ["*.mp4", "*.mkv", "*.avi", "*.webm"]
+              files = []
+              for ext in extensions:
+                  files.extend(glob.glob(f"{work_dir}/**/{ext}", recursive=True))
 
-                  def progress(current, total):
-                      pct = (current / total) * 100
-                      print(f"\r⚡ Upload: {pct:.1f}% ({current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB)", end="")
+              if files:
+                  target_file = max(files, key=os.path.getsize)
+                  size_mb = os.path.getsize(target_file) / (1024 * 1024)
+                  print(f"Uploading file ({size_mb:.2f} MB)...")
+
+                  def progress(cur, tot):
+                      pct = (cur / tot) * 100
+                      print(f"\rProgress: {pct:.1f}%", end="")
 
                   await client.send_file(
                       MOVIES_CHANNEL,
-                      m_file,
-                      caption=f"🍿 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
-                      parse_mode='html',
+                      target_file,
+                      caption=f"🎬 <b>{TITLE}</b>",
+                      parse_mode="html",
                       supports_streaming=True,
                       progress_callback=progress
                   )
-                  print("\n\n🎉 සම්පූර්ණයි! සාර්ථකව චිත්‍රපටය Telegram Channel එකට Upload විය!")
+                  print("\nUpload completed successfully.")
               else:
-                  print("❌ No video file found.")
+                  print("No media files found to upload.")
 
               await client.disconnect()
 
-          asyncio.run(upload_to_telegram())
+          asyncio.run(run_uploader())
           EOF
-          python uploader.py
+          python process_upload.py
