@@ -19,10 +19,10 @@ jobs:
   cloud_download_and_upload:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Fast Engines
+      - name: Setup Fast Engines & Cryptography
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y aria2 ffmpeg unzip
+          sudo apt-get install -y aria2 ffmpeg unzip python3-dev libssl-dev
           pip install telethon cryptg requests
 
       - name: Process Media Download & Telegram Upload
@@ -35,8 +35,10 @@ jobs:
           POSTER_URL: "${{ github.event.inputs.poster }}"
         run: |
           cat << 'EOF' > uploader.py
-          import os, glob, asyncio, subprocess, zipfile, requests
+          import os, glob, math, asyncio, subprocess, zipfile, requests
           from telethon import TelegramClient
+          from telethon.tl.functions.upload import SaveBigFilePartRequest
+          from telethon.tl.types import InputFileBig
 
           API_ID = 31518596
           API_HASH = "450525f29be7392a388c0547e391360f"
@@ -50,9 +52,8 @@ jobs:
           work_dir = "/tmp/movie_temp"
           os.makedirs(work_dir, exist_ok=True)
 
-          print(f"🎬 Starting download for: {TITLE}")
+          print(f"🎬 Starting Turbo Download for: {TITLE}")
 
-          # Determine whether it is a Magnet or a Direct HTTP/HTTPS URL
           if URI.startswith("magnet:?"):
               trackers = (
                   "&tr=udp://tracker.opentrackr.org:1337/announce"
@@ -61,6 +62,7 @@ jobs:
                   "&tr=udp://tracker.openbittorrent.com:80"
                   "&tr=udp://tracker.coppersurfer.tk:6969"
                   "&tr=udp://glotorrents.pw:6969/announce"
+                  "&tr=udp://p4p.arenabg.com:1337"
               )
               full_uri = URI + trackers if "&tr=" not in URI else URI
               cmd = [
@@ -76,19 +78,25 @@ jobs:
                   full_uri
               ]
           else:
-              print("⚡ Detected Direct Link (Seedr / Web URL). Downloading with 16 connections...")
+              print("⚡ Detected Direct Link (Seedr / Web URL). Downloading with 16 Parallel Connections & Turbo Chunks...")
               cmd = [
                   "aria2c",
                   "-x16",
                   "-s16",
                   "-k1M",
+                  "--max-connection-per-server=16",
+                  "--split=16",
+                  "--min-split-size=1M",
+                  "--stream-piece-selector=geom",
+                  "--file-allocation=none",
+                  "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                   "--summary-interval=5",
                   f"--dir={work_dir}",
                   URI
               ]
+
           subprocess.run(cmd)
 
-          # Auto-extract any zip files if present
           zip_files = glob.glob(f"{work_dir}/**/*.zip", recursive=True) + glob.glob(f"{work_dir}/*.zip")
           for zf in zip_files:
               print(f"📦 Extracting Zip Archive: {zf}")
@@ -99,12 +107,54 @@ jobs:
               except Exception as ze:
                   print(f"Zip extraction note: {ze}")
 
-          # Telethon 2GB MTProto Cloud Upload
+          async def fast_upload_file(client, file_path, workers=8):
+              file_size = os.path.getsize(file_path)
+              part_size = 512 * 1024
+              part_count = math.ceil(file_size / part_size)
+              file_id = client._get_input_file_id()
+              sem = asyncio.Semaphore(workers)
+              uploaded = 0
+
+              print(f"🚀 Initializing Parallel Multi-Stream Upload ({workers} workers) for {file_size / (1024*1024):.2f} MB...")
+
+              async def upload_part(part_index, data):
+                  nonlocal uploaded
+                  async with sem:
+                      for attempt in range(4):
+                          try:
+                              await client(SaveBigFilePartRequest(
+                                  file_id=file_id,
+                                  file_part=part_index,
+                                  file_total_parts=part_count,
+                                  bytes=data
+                              ))
+                              uploaded += len(data)
+                              pct = (uploaded / file_size) * 100
+                              print(f"\r⚡ Turbo Upload: {pct:.1f}% ({uploaded/(1024*1024):.1f}MB / {file_size/(1024*1024):.1f}MB)", end="", flush=True)
+                              break
+                          except Exception as e:
+                              if attempt == 3:
+                                  raise e
+                              await asyncio.sleep(1)
+
+              with open(file_path, "rb") as f:
+                  tasks = []
+                  for i in range(part_count):
+                      chunk = f.read(part_size)
+                      tasks.append(upload_part(i, chunk))
+                  await asyncio.gather(*tasks)
+
+              print("\n✅ All parts transferred to Telegram Cloud servers!")
+              return InputFileBig(
+                  id=file_id,
+                  parts=part_count,
+                  name=os.path.basename(file_path)
+              )
+
           async def upload_to_telegram():
               client = TelegramClient("gh_cloud_session", API_ID, API_HASH)
               await client.start(bot_token=BOT_TOKEN)
 
-              # Upload Thumbnail
               if POSTER:
                   print("🖼️ Uploading Poster...")
                   try:
@@ -117,7 +167,6 @@ jobs:
                   except Exception as pe:
                       print(f"Notice on poster: {pe}")
 
-              # Find all video files (mp4, mkv, avi, webm)
               v_files = []
               for ext in ["*.mp4", "*.mkv", "*.avi", "*.webm"]:
                   v_files.extend(glob.glob(f"{work_dir}/**/{ext}", recursive=True))
@@ -125,50 +174,58 @@ jobs:
               if v_files:
                   m_file = max(v_files, key=os.path.getsize)
                   size_mb = os.path.getsize(m_file) / (1024 * 1024)
-                  print(f"🚀 Uploading {size_mb:.2f} MB Movie directly to Telegram Channel...")
+                  print(f"🎬 Selected Video: {os.path.basename(m_file)} ({size_mb:.2f} MB)")
 
-                  def progress(current, total):
-                      pct = (current / total) * 100
-                      print(f"\r⚡ Upload: {pct:.1f}% ({current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB)", end="")
-
-                  sent_msg = await client.send_file(
-                      MOVIES_CHANNEL,
-                      m_file,
-                      caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
-                      parse_mode="html",
-                      supports_streaming=True,
-                      progress_callback=progress
-                  )
-                  print(f"\n\n🎉 සාර්ථකයි! සම්පූර්ණ චිත්‍රපටයම Telegram Channel එකට Upload විය! (Message ID: {sent_msg.id})")
-
-                  # 🔥 AUTOMATIC FIREBASE REALTIME DATABASE SYNC
+                  sent_msg = None
                   try:
-                      fb_url = "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app/movies.json"
-                      res = requests.get(fb_url, timeout=10)
-                      if res.status_code == 200 and res.json():
-                          movies_dict = res.json()
-                          matched_key = None
-                          clean_title = TITLE.lower()
-                          for k, v in movies_dict.items():
-                              if isinstance(v, dict):
-                                  m_title = (v.get("title") or "").strip().lower()
-                                  if m_title and (m_title in clean_title or clean_title in m_title):
-                                      matched_key = k
-                                      break
+                      input_file = await fast_upload_file(client, m_file, workers=8)
+                      sent_msg = await client.send_file(
+                          MOVIES_CHANNEL,
+                          input_file,
+                          caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
+                          parse_mode="html",
+                          supports_streaming=True
+                      )
+                  except Exception as turbo_err:
+                      print(f"\n⚠️ Fast upload notice: {turbo_err}. Switching to standard upload...")
+                      sent_msg = await client.send_file(
+                          MOVIES_CHANNEL,
+                          m_file,
+                          caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
+                          parse_mode="html",
+                          supports_streaming=True
+                      )
 
-                          if matched_key:
-                              patch_url = f"https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app/movies/{matched_key}.json"
-                              patch_payload = {
-                                  "telegramMessageId": str(sent_msg.id),
-                                  "directStreamUrl": f"https://sinhalahub-backend.fly.dev/stream/{sent_msg.id}",
-                                  "telegramPostUrl": f"https://t.me/cinestream_lk/{sent_msg.id}"
-                              }
-                              p_res = requests.patch(patch_url, json=patch_payload, timeout=10)
-                              print(f"✅ Firebase Realtime Database Updated automatically! Key: {matched_key}, Status: {p_res.status_code}")
-                          else:
-                              print(f"ℹ️ No matching title in Firebase found for {TITLE}")
-                  except Exception as fbe:
-                      print(f"⚠️ Firebase update exception: {fbe}")
+                  if sent_msg:
+                      print(f"\n\n🎉 සාර්ථකයි! සම්පූර්ණ චිත්‍රපටයම Telegram Channel එකට Upload විය! (Message ID: {sent_msg.id})")
+
+                      try:
+                          fb_url = "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app/movies.json"
+                          res = requests.get(fb_url, timeout=10)
+                          if res.status_code == 200 and res.json():
+                              movies_dict = res.json()
+                              matched_key = None
+                              clean_title = TITLE.lower()
+                              for k, v in movies_dict.items():
+                                  if isinstance(v, dict):
+                                      m_title = (v.get("title") or "").strip().lower()
+                                      if m_title and (m_title in clean_title or clean_title in m_title):
+                                          matched_key = k
+                                          break
+                              if matched_key:
+                                  patch_url = f"https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app/movies/{matched_key}.json"
+                                  patch_payload = {
+                                      "id": matched_key,
+                                      "telegramMessageId": str(sent_msg.id),
+                                      "directStreamUrl": f"https://sinhalahub-backend.fly.dev/stream/{sent_msg.id}",
+                                      "telegramPostUrl": f"https://t.me/cinestream_lk/{sent_msg.id}"
+                                  }
+                                  p_res = requests.patch(patch_url, json=patch_payload, timeout=10)
+                                  print(f"✅ Firebase Realtime Database Updated automatically! Key: {matched_key}, Status: {p_res.status_code}")
+                              else:
+                                  print(f"ℹ️ No matching title in Firebase found for {TITLE}")
+                      except Exception as fbe:
+                          print(f"⚠️ Firebase update exception: {fbe}")
               else:
                   print("❌ No video file found.")
 
@@ -176,4 +233,5 @@ jobs:
 
           asyncio.run(upload_to_telegram())
           EOF
+
           python uploader.py
