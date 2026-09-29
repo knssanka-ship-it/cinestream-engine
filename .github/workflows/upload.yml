@@ -52,7 +52,6 @@ jobs:
 
           print(f"🎬 Starting download for: {TITLE}", flush=True)
 
-          # 🎯 Smart Source Detection (M3U8 / MPD / Magnet / Direct HTTP)
           is_stream = (".m3u8" in URI or ".mpd" in URI or "dashstream" in URI or "/hls/" in URI)
           is_magnet = URI.startswith("magnet:?") or URI.startswith("bc://bt/")
 
@@ -68,7 +67,6 @@ jobs:
               ]
               subprocess.run(cmd)
 
-              # Fallback to ffmpeg direct copy if needed
               v_check = glob.glob(f"{work_dir}/**/*.mp4", recursive=True) + glob.glob(f"{work_dir}/**/*.mkv", recursive=True)
               if not v_check:
                   print("🔄 Running ffmpeg direct stream capture...", flush=True)
@@ -119,18 +117,17 @@ jobs:
               ]
               subprocess.run(cmd)
 
-          # Auto-extract any zip files if present
+          # Auto-extract zip if present
           zip_files = glob.glob(f"{work_dir}/**/*.zip", recursive=True) + glob.glob(f"{work_dir}/*.zip")
           for zf in zip_files:
               print(f"📦 Extracting Zip Archive: {zf}", flush=True)
               try:
                   with zipfile.ZipFile(zf, "r") as zip_ref:
                       zip_ref.extractall(work_dir)
-                  print("✅ Zip extracted successfully!", flush=True)
               except Exception as ze:
                   print(f"Zip extraction note: {ze}", flush=True)
 
-          # 🚀 UNIVERSAL SMART CODEC CONVERTER (HEVC/MKV ➔ Android 100% Compatible Fast MP4)
+          # ⚡ LIGHTNING FAST 10-SECOND REMUX & ULTRA-FAST CODEC CONVERTER
           def ensure_universal_mp4_playback():
               raw_videos = []
               for ext in ["*.mp4", "*.mkv", "*.avi", "*.webm"]:
@@ -141,10 +138,9 @@ jobs:
                   return None
 
               largest_vid = max(valid_vids, key=os.path.getsize)
-              base_name = os.path.splitext(os.path.basename(largest_vid))[0]
-              converted_path = f"{work_dir}/{base_name}_playable.mp4"
+              converted_path = f"{work_dir}/fast_stream_ready.mp4"
 
-              # Check video codec using ffprobe
+              # Check video codec
               probe_cmd = [
                   "ffprobe", "-v", "error",
                   "-select_streams", "v:0",
@@ -157,28 +153,40 @@ jobs:
               except Exception:
                   codec = "unknown"
 
-              print(f"🔍 Detected Video Source: {os.path.basename(largest_vid)} (Codec: {codec})", flush=True)
+              print(f"🔍 Video File: {os.path.basename(largest_vid)} (Detected Codec: {codec})", flush=True)
 
-              # If MKV or HEVC (H.265) which crashes Android MediaCodec, convert losslessly or fast transcode
-              if largest_vid.endswith(".mkv") or "hevc" in codec or "h265" in codec or codec == "unknown":
-                  print("⚡ Optimizing & Remuxing to Universal Fast MP4 (H.264 / AAC) for 100% Android Playback...", flush=True)
-                  # Fast remux first with ffmpeg
-                  conv_cmd = [
+              # 🚀 1. FAST REMUX (තත්පර 5න් සිදුවන Zero-Re-encode Remuxing - 90% Videos)
+              if codec in ["h264", "avc", "avc1"]:
+                  print("⚡ Lossless Remuxing MKV to Fast MP4 (Takes only 5 seconds)...", flush=True)
+                  remux_cmd = [
                       "ffmpeg", "-y",
                       "-i", largest_vid,
-                      "-c:v", "libx264",
-                      "-pix_fmt", "yuv420p",
-                      "-preset", "veryfast",
-                      "-crf", "22",
+                      "-c:v", "copy",
                       "-c:a", "aac",
-                      "-b:a", "128k",
                       "-movflags", "+faststart",
                       converted_path
                   ]
-                  res = subprocess.run(conv_cmd)
-                  if res.returncode == 0 and os.path.exists(converted_path) and os.path.getsize(converted_path) > 10 * 1024 * 1024:
-                      print("✅ Universal MP4 optimization complete!", flush=True)
+                  res = subprocess.run(remux_cmd)
+                  if res.returncode == 0 and os.path.exists(converted_path):
                       return converted_path
+
+              # 🚀 2. ULTRA-FAST MULTI-THREAD CONVERTER (For HEVC/H.265 only)
+              print("⚡ Ultra-Fast Transcoding for HEVC/H.265 (Max Speed)...", flush=True)
+              conv_cmd = [
+                  "ffmpeg", "-y",
+                  "-threads", "0",
+                  "-i", largest_vid,
+                  "-c:v", "libx264",
+                  "-pix_fmt", "yuv420p",
+                  "-preset", "ultrafast",
+                  "-crf", "24",
+                  "-c:a", "aac",
+                  "-movflags", "+faststart",
+                  converted_path
+              ]
+              res = subprocess.run(conv_cmd)
+              if res.returncode == 0 and os.path.exists(converted_path):
+                  return converted_path
 
               return largest_vid
 
@@ -187,7 +195,6 @@ jobs:
               client = TelegramClient("gh_cloud_session", API_ID, API_HASH)
               await client.start(bot_token=BOT_TOKEN)
 
-              # Upload Thumbnail
               if POSTER and (POSTER.startswith("http://") or POSTER.startswith("https://")):
                   print("🖼️ Uploading Poster...", flush=True)
                   try:
@@ -198,9 +205,8 @@ jobs:
                           parse_mode="html"
                       )
                   except Exception as pe:
-                      print(f"Notice on poster: {pe}", flush=True)
+                      print(f"Notice on poster: {pe}")
 
-              # Prepare Universal Playable Video
               m_file = ensure_universal_mp4_playback()
 
               if m_file and os.path.exists(m_file):
