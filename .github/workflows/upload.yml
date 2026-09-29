@@ -8,7 +8,7 @@ on:
         required: true
         default: 'Mutiny (2026)'
       magnet:
-        description: 'Download Link (Magnet or Direct/Seedr URL)'
+        description: 'Download Link (Magnet, Direct/Seedr, or M3U8/MPD Stream URL)'
         required: true
       poster:
         description: 'Poster Image URL'
@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y aria2 ffmpeg unzip
-          pip install telethon cryptg requests
+          pip install telethon cryptg requests yt-dlp
 
       - name: Process Media Download & Telegram Upload
         env:
@@ -52,7 +52,37 @@ jobs:
 
           print(f"🎬 Starting download for: {TITLE}", flush=True)
 
-          if URI.startswith("magnet:?"):
+          # 🎯 Smart Source Detection (M3U8 / MPD / Magnet / Direct HTTP)
+          is_stream = (".m3u8" in URI or ".mpd" in URI or "dashstream" in URI or "/hls/" in URI)
+          is_magnet = URI.startswith("magnet:?") or URI.startswith("bc://bt/")
+
+          if is_stream:
+              print("🌐 [HLS/DASH Stream Detected] Downloading full movie via yt-dlp / ffmpeg engine...", flush=True)
+              cmd = [
+                  "yt-dlp",
+                  "--concurrent-fragments", "16",
+                  "--hls-prefer-native",
+                  "--no-warnings",
+                  "-o", f"{work_dir}/movie.%(ext)s",
+                  URI
+              ]
+              subprocess.run(cmd)
+
+              # Fallback to ffmpeg direct copy if needed
+              v_check = glob.glob(f"{work_dir}/**/*.mp4", recursive=True) + glob.glob(f"{work_dir}/**/*.mkv", recursive=True)
+              if not v_check:
+                  print("🔄 Running ffmpeg direct stream capture...", flush=True)
+                  ff_cmd = [
+                      "ffmpeg", "-y",
+                      "-i", URI,
+                      "-c", "copy",
+                      "-bsf:a", "aac_adtstoasc",
+                      f"{work_dir}/movie.mp4"
+                  ]
+                  subprocess.run(ff_cmd)
+
+          elif is_magnet:
+              print("🧲 [Torrent Magnet Detected] Downloading via aria2c P2P engine...", flush=True)
               trackers = (
                   "&tr=udp://tracker.opentrackr.org:1337/announce"
                   "&tr=udp://open.tracker.cl:1337/announce"
@@ -74,6 +104,8 @@ jobs:
                   f"--dir={work_dir}",
                   full_uri
               ]
+              subprocess.run(cmd)
+
           else:
               print("⚡ Detected Direct Link (Seedr / Web URL). Downloading...", flush=True)
               cmd = [
@@ -85,8 +117,7 @@ jobs:
                   f"--dir={work_dir}",
                   URI
               ]
-
-          subprocess.run(cmd)
+              subprocess.run(cmd)
 
           # Auto-extract any zip files if present
           zip_files = glob.glob(f"{work_dir}/**/*.zip", recursive=True) + glob.glob(f"{work_dir}/*.zip")
@@ -105,7 +136,7 @@ jobs:
               await client.start(bot_token=BOT_TOKEN)
 
               # Upload Thumbnail
-              if POSTER:
+              if POSTER and (POSTER.startswith("http://") or POSTER.startswith("https://")):
                   print("🖼️ Uploading Poster...", flush=True)
                   try:
                       await client.send_file(
@@ -117,10 +148,12 @@ jobs:
                   except Exception as pe:
                       print(f"Notice on poster: {pe}", flush=True)
 
-              # Find all video files (mp4, mkv, avi, webm)
+              # Find all video files (mp4, mkv, avi, webm) and exclude raw playlist texts
               v_files = []
               for ext in ["*.mp4", "*.mkv", "*.avi", "*.webm"]:
                   v_files.extend(glob.glob(f"{work_dir}/**/{ext}", recursive=True))
+
+              v_files = [f for f in v_files if not f.endswith(".mpd") and not f.endswith(".m3u8")]
 
               if v_files:
                   m_file = max(v_files, key=os.path.getsize)
