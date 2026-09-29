@@ -130,6 +130,58 @@ jobs:
               except Exception as ze:
                   print(f"Zip extraction note: {ze}", flush=True)
 
+          # 🚀 UNIVERSAL SMART CODEC CONVERTER (HEVC/MKV ➔ Android 100% Compatible Fast MP4)
+          def ensure_universal_mp4_playback():
+              raw_videos = []
+              for ext in ["*.mp4", "*.mkv", "*.avi", "*.webm"]:
+                  raw_videos.extend(glob.glob(f"{work_dir}/**/{ext}", recursive=True))
+
+              valid_vids = [f for f in raw_videos if not f.endswith(".mpd") and not f.endswith(".m3u8")]
+              if not valid_vids:
+                  return None
+
+              largest_vid = max(valid_vids, key=os.path.getsize)
+              base_name = os.path.splitext(os.path.basename(largest_vid))[0]
+              converted_path = f"{work_dir}/{base_name}_playable.mp4"
+
+              # Check video codec using ffprobe
+              probe_cmd = [
+                  "ffprobe", "-v", "error",
+                  "-select_streams", "v:0",
+                  "-show_entries", "stream=codec_name",
+                  "-of", "default=noprint_wrappers=1:nokey=1",
+                  largest_vid
+              ]
+              try:
+                  codec = subprocess.check_output(probe_cmd).decode().strip().lower()
+              except Exception:
+                  codec = "unknown"
+
+              print(f"🔍 Detected Video Source: {os.path.basename(largest_vid)} (Codec: {codec})", flush=True)
+
+              # If MKV or HEVC (H.265) which crashes Android MediaCodec, convert losslessly or fast transcode
+              if largest_vid.endswith(".mkv") or "hevc" in codec or "h265" in codec or codec == "unknown":
+                  print("⚡ Optimizing & Remuxing to Universal Fast MP4 (H.264 / AAC) for 100% Android Playback...", flush=True)
+                  # Fast remux first with ffmpeg
+                  conv_cmd = [
+                      "ffmpeg", "-y",
+                      "-i", largest_vid,
+                      "-c:v", "libx264",
+                      "-pix_fmt", "yuv420p",
+                      "-preset", "veryfast",
+                      "-crf", "22",
+                      "-c:a", "aac",
+                      "-b:a", "128k",
+                      "-movflags", "+faststart",
+                      converted_path
+                  ]
+                  res = subprocess.run(conv_cmd)
+                  if res.returncode == 0 and os.path.exists(converted_path) and os.path.getsize(converted_path) > 10 * 1024 * 1024:
+                      print("✅ Universal MP4 optimization complete!", flush=True)
+                      return converted_path
+
+              return largest_vid
+
           # Telethon 2GB MTProto Cloud Upload
           async def upload_to_telegram():
               client = TelegramClient("gh_cloud_session", API_ID, API_HASH)
@@ -148,15 +200,10 @@ jobs:
                   except Exception as pe:
                       print(f"Notice on poster: {pe}", flush=True)
 
-              # Find all video files (mp4, mkv, avi, webm) and exclude raw playlist texts
-              v_files = []
-              for ext in ["*.mp4", "*.mkv", "*.avi", "*.webm"]:
-                  v_files.extend(glob.glob(f"{work_dir}/**/{ext}", recursive=True))
+              # Prepare Universal Playable Video
+              m_file = ensure_universal_mp4_playback()
 
-              v_files = [f for f in v_files if not f.endswith(".mpd") and not f.endswith(".m3u8")]
-
-              if v_files:
-                  m_file = max(v_files, key=os.path.getsize)
+              if m_file and os.path.exists(m_file):
                   size_mb = os.path.getsize(m_file) / (1024 * 1024)
                   print(f"🚀 Uploading {size_mb:.2f} MB Movie directly to Telegram Channel...", flush=True)
 
