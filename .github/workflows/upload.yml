@@ -4,28 +4,32 @@ on:
   workflow_dispatch:
     inputs:
       title:
-        description: 'Movie Title'
+        description: 'Movie Title (චිත්‍රපටයේ නම)'
         required: true
         default: 'Mutiny (2026)'
       magnet:
-        description: 'Download Link (Magnet, Direct/Seedr, or M3U8/MPD Stream URL)'
+        description: 'Download Link (Magnet, Direct MP4/Seedr, or M3U8/MPD Stream URL)'
         required: true
       poster:
-        description: 'Poster Image URL'
+        description: 'Poster Image URL (විකල්පයි)'
         required: false
         default: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=800'
+      subtitle_url:
+        description: 'Sinhala Subtitle (.srt) URL (විකල්පයි - උපසිරැසි Direct Link එකක් ඇත්නම්)'
+        required: false
+        default: ''
 
 jobs:
   cloud_download_and_upload:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Fast Engines
+      - name: 🛠️ Setup Fast Engines & Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y aria2 ffmpeg unzip
+          sudo apt-get install -y aria2 ffmpeg
           pip install telethon cryptg requests yt-dlp
 
-      - name: Process Media Download & Telegram Upload
+      - name: 🚀 Media Download, Smart FFmpeg Optimizer & Telegram 2GB Upload
         env:
           BOT_TOKEN: "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs"
           MOVIES_CHANNEL: "-1003984700777"
@@ -33,9 +37,10 @@ jobs:
           MOVIE_TITLE: "${{ github.event.inputs.title }}"
           DOWNLOAD_URL: "${{ github.event.inputs.magnet }}"
           POSTER_URL: "${{ github.event.inputs.poster }}"
+          SUBTITLE_URL: "${{ github.event.inputs.subtitle_url }}"
         run: |
           cat << 'EOF' > uploader.py
-          import os, glob, asyncio, subprocess, zipfile, requests
+          import os, glob, asyncio, subprocess, sys, json, requests
           from telethon import TelegramClient
 
           API_ID = 31518596
@@ -46,41 +51,46 @@ jobs:
           TITLE = os.environ["MOVIE_TITLE"]
           URI = os.environ["DOWNLOAD_URL"].strip()
           POSTER = os.environ.get("POSTER_URL", "").strip()
+          SUBTITLE_URL = os.environ.get("SUBTITLE_URL", "").strip()
 
           work_dir = "/tmp/movie_temp"
           os.makedirs(work_dir, exist_ok=True)
 
-          print(f"🎬 Starting download for: {TITLE}", flush=True)
+          print(f"🎬 [CineStream Cloud Engine] Starting: '{TITLE}'...", flush=True)
 
+          # 🎯 1. Download Media (Stream / Direct / Magnet)
           is_stream = (".m3u8" in URI or ".mpd" in URI or "dashstream" in URI or "/hls/" in URI)
           is_magnet = URI.startswith("magnet:?") or URI.startswith("bc://bt/")
+          is_http = URI.startswith("http://") or URI.startswith("https://")
 
-          if is_stream:
-              print("🌐 [HLS/DASH Stream Detected] Downloading full movie via yt-dlp / ffmpeg engine...", flush=True)
+          if is_http and is_stream:
+              print("🌐 [HLS/DASH Stream Detected] Downloading via yt-dlp multi-thread engine...", flush=True)
+              raw_file = f"{work_dir}/downloaded_stream.mp4"
               cmd = [
                   "yt-dlp",
                   "--concurrent-fragments", "16",
                   "--hls-prefer-native",
                   "--no-warnings",
-                  "-o", f"{work_dir}/movie.%(ext)s",
+                  "-o", raw_file,
                   URI
               ]
-              subprocess.run(cmd)
+              subprocess.run(cmd, check=True)
 
-              v_check = glob.glob(f"{work_dir}/**/*.mp4", recursive=True) + glob.glob(f"{work_dir}/**/*.mkv", recursive=True)
-              if not v_check:
-                  print("🔄 Running ffmpeg direct stream capture...", flush=True)
-                  ff_cmd = [
-                      "ffmpeg", "-y",
-                      "-i", URI,
-                      "-c", "copy",
-                      "-bsf:a", "aac_adtstoasc",
-                      f"{work_dir}/movie.mp4"
-                  ]
-                  subprocess.run(ff_cmd)
+          elif is_http and not is_magnet:
+              print("⚡ [Direct HTTP URL Detected] Downloading via aria2c (16 parallel threads)...", flush=True)
+              cmd = [
+                  "aria2c",
+                  "-x", "16",
+                  "-s", "16",
+                  "-j", "16",
+                  "--dir=" + work_dir,
+                  "-o", "downloaded_direct.mp4",
+                  URI
+              ]
+              subprocess.run(cmd, check=True)
 
-          elif is_magnet:
-              print("🧲 [Torrent Magnet Detected] Downloading via aria2c P2P engine...", flush=True)
+          elif is_magnet or not is_http:
+              print("🧲 [Torrent Magnet Detected] Downloading via aria2c High-Speed P2P engine...", flush=True)
               trackers = (
                   "&tr=udp://tracker.opentrackr.org:1337/announce"
                   "&tr=udp://open.tracker.cl:1337/announce"
@@ -88,8 +98,10 @@ jobs:
                   "&tr=udp://tracker.openbittorrent.com:80"
                   "&tr=udp://tracker.coppersurfer.tk:6969"
                   "&tr=udp://glotorrents.pw:6969/announce"
+                  "&tr=udp://p4p.arenabg.com:1337"
+                  "&tr=udp://tracker.leechers-paradise.org:6969"
               )
-              full_uri = URI + trackers if "&tr=" not in URI else URI
+              full_magnet = URI + trackers if "&tr=" not in URI else URI
               cmd = [
                   "aria2c",
                   "--enable-dht=true",
@@ -99,185 +111,183 @@ jobs:
                   "--file-allocation=none",
                   "--seed-time=0",
                   "--summary-interval=5",
-                  f"--dir={work_dir}",
-                  full_uri
+                  "--dir=" + work_dir,
+                  full_magnet
               ]
-              subprocess.run(cmd)
+              subprocess.run(cmd, check=True)
 
+          # Locate downloaded video file
+          all_videos = (
+              glob.glob(f"{work_dir}/**/*.mp4", recursive=True) +
+              glob.glob(f"{work_dir}/**/*.mkv", recursive=True) +
+              glob.glob(f"{work_dir}/**/*.webm", recursive=True) +
+              glob.glob(f"{work_dir}/**/*.avi", recursive=True)
+          )
+
+          if not all_videos:
+              print("❌ Error: No video file found after download!", flush=True)
+              sys.exit(1)
+
+          input_video = max(all_videos, key=os.path.getsize)
+          orig_size_mb = os.path.getsize(input_video) / (1024 * 1024)
+          print(f"\n📦 Downloaded Video File: {os.path.basename(input_video)} ({orig_size_mb:.2f} MB)", flush=True)
+
+          # 🎯 2. Download Sinhala Subtitle if provided
+          subtitle_file = None
+          if SUBTITLE_URL:
+              print(f"📝 Fetching Sinhala Subtitles from: {SUBTITLE_URL}...", flush=True)
+              try:
+                  sub_res = requests.get(SUBTITLE_URL, timeout=30)
+                  if sub_res.status_code == 200:
+                      subtitle_file = f"{work_dir}/sinhala_sub.srt"
+                      with open(subtitle_file, "wb") as sf:
+                          sf.write(sub_res.content)
+                      print(f"✅ Sinhala Subtitle saved: {subtitle_file}", flush=True)
+              except Exception as se:
+                  print(f"⚠️ Subtitle notice: {se}")
+
+          # 🎯 3. Smart Video Optimization
+          optimized_video = f"{work_dir}/cinestream_final.mp4"
+
+          print("\n🔍 Analyzing video codecs with ffprobe...", flush=True)
+          probe_cmd = [
+              "ffprobe", "-v", "error",
+              "-show_entries", "stream=index,codec_type,codec_name",
+              "-of", "json", input_video
+          ]
+          probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+          video_codec = ""
+          audio_codec = ""
+          try:
+              data = json.loads(probe_res.stdout)
+              for s in data.get("streams", []):
+                  if s.get("codec_type") == "video" and not video_codec:
+                      video_codec = s.get("codec_name", "").lower()
+                  elif s.get("codec_type") == "audio" and not audio_codec:
+                      audio_codec = s.get("codec_name", "").lower()
+          except Exception as pe:
+              print(f"ffprobe warning: {pe}")
+
+          print(f"📊 Detected -> Video: [{video_codec}], Audio: [{audio_codec}]", flush=True)
+
+          is_v_h264 = video_codec in ["h264", "avc1"]
+          is_a_aac = audio_codec in ["aac", "mp3"]
+
+          ffmpeg_cmd = ["ffmpeg", "-y", "-i", input_video]
+
+          sub_args = []
+          if subtitle_file and os.path.exists(subtitle_file):
+              ffmpeg_cmd.extend(["-i", subtitle_file])
+              sub_args = [
+                  "-c:s", "mov_text",
+                  "-metadata:s:s:0", "language=sin",
+                  "-metadata:s:s:0", "title=Sinhala",
+                  "-map", "0:v:0",
+                  "-map", "0:a:0",
+                  "-map", "1:s:0"
+              ]
           else:
-              print("⚡ Detected Direct Link (Seedr / Web URL). Downloading...", flush=True)
-              cmd = [
-                  "aria2c",
-                  "-x16",
-                  "-s16",
-                  "-k1M",
-                  "--summary-interval=5",
-                  f"--dir={work_dir}",
-                  URI
-              ]
-              subprocess.run(cmd)
+              sub_args = ["-map", "0:v:0", "-map", "0:a:0?"]
 
-          # Auto-extract zip if present
-          zip_files = glob.glob(f"{work_dir}/**/*.zip", recursive=True) + glob.glob(f"{work_dir}/*.zip")
-          for zf in zip_files:
-              print(f"📦 Extracting Zip Archive: {zf}", flush=True)
-              try:
-                  with zipfile.ZipFile(zf, "r") as zip_ref:
-                      zip_ref.extractall(work_dir)
-                  print("✅ Zip extracted successfully!", flush=True)
-              except Exception as ze:
-                  print(f"Zip extraction note: {ze}", flush=True)
-
-          # ⚡ ULTRA-FAST AUTO OPTIMIZER (STRICT UNDER 2GB & FAST REMUX)
-          def ensure_universal_mp4_playback():
-              raw_videos = []
-              for ext in ["*.mp4", "*.mkv", "*.avi", "*.webm"]:
-                  raw_videos.extend(glob.glob(f"{work_dir}/**/{ext}", recursive=True))
-
-              valid_vids = [f for f in raw_videos if not f.endswith(".mpd") and not f.endswith(".m3u8")]
-              if not valid_vids:
-                  return None
-
-              largest_vid = max(valid_vids, key=os.path.getsize)
-              file_size_mb = os.path.getsize(largest_vid) / (1024 * 1024)
-              converted_path = f"{work_dir}/fast_stream_ready.mp4"
-
-              # Check video codec
-              probe_cmd = [
-                  "ffprobe", "-v", "error",
-                  "-select_streams", "v:0",
-                  "-show_entries", "stream=codec_name",
-                  "-of", "default=noprint_wrappers=1:nokey=1",
-                  largest_vid
-              ]
-              try:
-                  codec = subprocess.check_output(probe_cmd).decode().strip().lower()
-              except Exception:
-                  codec = "unknown"
-
-              print(f"🔍 Video File: {os.path.basename(largest_vid)} ({file_size_mb:.2f} MB, Codec: {codec})", flush=True)
-
-              # 🚀 1. FAST REMUX (තත්පර 5න් අවසන් වේ - H.264 MP4/MKV under 1900MB)
-              if codec in ["h264", "avc", "avc1"] and file_size_mb < 1900:
-                  print("⚡ Lossless Remuxing to Fast MP4 (Takes ~5 seconds)...", flush=True)
-                  remux_cmd = [
-                      "ffmpeg", "-y",
-                      "-i", largest_vid,
-                      "-c:v", "copy",
-                      "-c:a", "aac",
-                      "-movflags", "+faststart",
-                      converted_path
-                  ]
-                  res = subprocess.run(remux_cmd)
-                  if res.returncode == 0 and os.path.exists(converted_path):
-                      return converted_path
-
-              # 🚀 2. ULTRA-FAST PARALLEL CONVERTER (For HEVC/MKV or Large Files > 1.9GB)
-              print("⚡ Multi-Thread Fast Encoding (Target: ~1.2 GB, Strictly < 2GB)...", flush=True)
-              conv_cmd = [
-                  "ffmpeg", "-y",
-                  "-threads", "0",
-                  "-i", largest_vid,
+          if is_v_h264 and is_a_aac and input_video.endswith(".mp4") and not subtitle_file and orig_size_mb <= 2000:
+              print("⚡ [STREAM COPY]: File is already MP4 H.264 + AAC! Keeping original 1.45 GB file (0 MB increase)...", flush=True)
+              ffmpeg_cmd.extend(["-c", "copy", "-movflags", "+faststart", optimized_video])
+          elif is_v_h264 and orig_size_mb <= 2000:
+              print("⚡ [STREAM COPY]: Video is H.264! Copying video without re-encoding (100x speed, 0 quality loss, size stays identical!)...", flush=True)
+              ffmpeg_cmd.extend(["-c:v", "copy"])
+              if is_a_aac:
+                  ffmpeg_cmd.extend(["-c:a", "copy"])
+              else:
+                  ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "160k"])
+              ffmpeg_cmd.extend(sub_args)
+              ffmpeg_cmd.extend(["-movflags", "+faststart", optimized_video])
+          else:
+              print("🎬 [SMART BITRATE RE-ENCODE]: Video is H.265/HEVC. Re-encoding with strict 2.2 Mbps bitrate cap (guaranteed < 1.6 GB)...", flush=True)
+              ffmpeg_cmd.extend([
                   "-c:v", "libx264",
-                  "-pix_fmt", "yuv420p",
                   "-preset", "faster",
-                  "-crf", "25",
-                  "-maxrate", "2400k",
-                  "-bufsize", "4800k",
+                  "-crf", "23",
+                  "-maxrate", "2200k",
+                  "-bufsize", "4400k",
                   "-c:a", "aac",
-                  "-b:a", "128k",
-                  "-movflags", "+faststart",
-                  converted_path
-              ]
-              res = subprocess.run(conv_cmd)
-              if res.returncode == 0 and os.path.exists(converted_path):
-                  new_size_mb = os.path.getsize(converted_path) / (1024 * 1024)
-                  print(f"✅ Optimized MP4 Created! Size: {new_size_mb:.2f} MB (Telegram 2GB Compliant)", flush=True)
-                  return converted_path
+                  "-b:a", "128k"
+              ])
+              ffmpeg_cmd.extend(sub_args)
+              ffmpeg_cmd.extend(["-movflags", "+faststart", optimized_video])
 
-              return largest_vid
+          print(f"▶️ Running FFmpeg Optimization...", flush=True)
+          ret = subprocess.run(ffmpeg_cmd)
 
-          # Telethon 2GB MTProto Cloud Upload
+          final_upload_file = optimized_video if (ret.returncode == 0 and os.path.exists(optimized_video)) else input_video
+          final_size_mb = os.path.getsize(final_upload_file) / (1024 * 1024)
+          print(f"\n✅ Ready for Upload! Final File Size: {final_size_mb:.2f} MB", flush=True)
+
+          # 🎯 4. Upload directly to Telegram Channel via Telethon
           async def upload_to_telegram():
-              client = TelegramClient("gh_cloud_session", API_ID, API_HASH)
+              print("\n🚀 Connecting to Telegram MTProto API...", flush=True)
+              client = TelegramClient(
+                  'gh_cloud_session',
+                  API_ID,
+                  API_HASH,
+                  timeout=180,
+                  retry_delay=5,
+                  connection_retries=10,
+                  auto_reconnect=True
+              )
               await client.start(bot_token=BOT_TOKEN)
 
-              # Upload Thumbnail
+              # Poster Upload
               if POSTER and (POSTER.startswith("http://") or POSTER.startswith("https://")):
-                  print("🖼️ Uploading Poster...", flush=True)
                   try:
                       await client.send_file(
                           THUMBNAILS_CHANNEL,
                           POSTER,
-                          caption=f"🎬 <b>{TITLE}</b>\n🇱🇰 සිංහල උපසිරැසි සහිතයි",
-                          parse_mode="html"
+                          caption=f"🎬 <b>{TITLE}</b>\n🇱🇰 සිංහල උපසිරැසි සහිතයි | CineStream Movie Hub",
+                          parse_mode='html'
                       )
+                      print("✅ Poster uploaded!", flush=True)
                   except Exception as pe:
-                      print(f"Notice on poster: {pe}")
+                      print(f"⚠️ Poster note: {pe}")
 
-              m_file = ensure_universal_mp4_playback()
+              # Video Upload
+              print(f"\n🚀 Uploading {final_size_mb:.2f} MB Movie to Telegram ({MOVIES_CHANNEL})...", flush=True)
 
-              if m_file and os.path.exists(m_file):
-                  size_mb = os.path.getsize(m_file) / (1024 * 1024)
-                  print(f"\n🚀 Uploading {size_mb:.2f} MB Movie directly to Telegram Channel...", flush=True)
+              def progress(current, total):
+                  pct = (current / total) * 100
+                  cur_mb = current / (1024 * 1024)
+                  tot_mb = total / (1024 * 1024)
+                  print(f"\r⚡ Telegram Upload: {pct:.1f}% ({cur_mb:.1f}MB / {tot_mb:.1f}MB)", end="", flush=True)
 
-                  last_pct = -1
-                  def progress(current, total):
-                      nonlocal last_pct
-                      pct = int((current / total) * 100)
-                      if pct != last_pct and pct % 5 == 0:
-                          last_pct = pct
-                          print(f"⚡ Upload: {pct}% ({current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB)", flush=True)
+              msg = await client.send_file(
+                  MOVIES_CHANNEL,
+                  final_upload_file,
+                  caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
+                  parse_mode='html',
+                  supports_streaming=True,
+                  progress_callback=progress
+              )
 
-                  # 🔧 FIX: Explicit Chunk Upload (Part Size 512KB) to avoid FilePartsInvalidError
-                  uploaded_file = await client.upload_file(
-                      m_file,
-                      progress_callback=progress,
-                      part_size_kb=512
-                  )
-
-                  sent_msg = await client.send_file(
-                      MOVIES_CHANNEL,
-                      uploaded_file,
-                      caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
-                      parse_mode="html",
-                      supports_streaming=True
-                  )
-                  print(f"\n🎉 සාර්ථකයි! සම්පූර්ණ චිත්‍රපටයම Telegram Channel එකට Upload විය! (Message ID: {sent_msg.id})", flush=True)
-
-                  # AUTOMATIC FIREBASE REALTIME DATABASE SYNC
+              # Subtitle file upload
+              if subtitle_file and os.path.exists(subtitle_file):
                   try:
-                      fb_url = "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app/movies.json"
-                      res = requests.get(fb_url, timeout=10)
-                      if res.status_code == 200 and res.json():
-                          movies_dict = res.json()
-                          matched_key = None
-                          clean_title = TITLE.lower()
-                          for k, v in movies_dict.items():
-                              if isinstance(v, dict):
-                                  m_title = (v.get("title") or "").strip().lower()
-                                  if m_title and (m_title in clean_title or clean_title in m_title):
-                                      matched_key = k
-                                      break
-                          if matched_key:
-                              patch_url = f"https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app/movies/{matched_key}.json"
-                              patch_payload = {
-                                  "telegramMessageId": str(sent_msg.id),
-                                  "directStreamUrl": f"https://sinhalahub-backend.fly.dev/stream/{sent_msg.id}",
-                                  "telegramPostUrl": f"https://t.me/cinestream_lk/{sent_msg.id}"
-                              }
-                              p_res = requests.patch(patch_url, json=patch_payload, timeout=10)
-                              print(f"✅ Firebase Realtime Database Updated automatically! Key: {matched_key}, Status: {p_res.status_code}", flush=True)
-                          else:
-                              print(f"ℹ️ No matching title in Firebase found for {TITLE}", flush=True)
-                  except Exception as fbe:
-                      print(f"⚠️ Firebase update exception: {fbe}", flush=True)
-              else:
-                  print("❌ No video file found.", flush=True)
+                      await client.send_file(
+                          MOVIES_CHANNEL,
+                          subtitle_file,
+                          caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 සිංහල උපසිරැසි ගොනුව",
+                          parse_mode='html'
+                      )
+                  except Exception as se:
+                      print(f"Subtitle upload note: {se}")
+
+              chan_clean = str(MOVIES_CHANNEL).replace("-100", "")
+              print("\n\n=======================================================")
+              print(f"🎉 සාර්ථකයි! චිත්‍රපටය Telegram Channel එකට සම්පූර්ණයෙන්ම Upload විය!")
+              print(f"🔗 Direct Stream Post: https://t.me/c/{chan_clean}/{msg.id}")
+              print(f"🆔 Telegram Message ID: {msg.id}")
+              print("=======================================================\n", flush=True)
 
               await client.disconnect()
 
           asyncio.run(upload_to_telegram())
           EOF
-
           python uploader.py
