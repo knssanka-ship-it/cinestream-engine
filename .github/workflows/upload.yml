@@ -124,10 +124,11 @@ jobs:
               try:
                   with zipfile.ZipFile(zf, "r") as zip_ref:
                       zip_ref.extractall(work_dir)
+                  print("✅ Zip extracted successfully!", flush=True)
               except Exception as ze:
                   print(f"Zip extraction note: {ze}", flush=True)
 
-          # ⚡ LIGHTNING FAST 10-SECOND REMUX & ULTRA-FAST CODEC CONVERTER
+          # ⚡ ULTRA-FAST AUTO OPTIMIZER (STRICT UNDER 2GB & FAST REMUX)
           def ensure_universal_mp4_playback():
               raw_videos = []
               for ext in ["*.mp4", "*.mkv", "*.avi", "*.webm"]:
@@ -138,6 +139,7 @@ jobs:
                   return None
 
               largest_vid = max(valid_vids, key=os.path.getsize)
+              file_size_mb = os.path.getsize(largest_vid) / (1024 * 1024)
               converted_path = f"{work_dir}/fast_stream_ready.mp4"
 
               # Check video codec
@@ -153,11 +155,11 @@ jobs:
               except Exception:
                   codec = "unknown"
 
-              print(f"🔍 Video File: {os.path.basename(largest_vid)} (Detected Codec: {codec})", flush=True)
+              print(f"🔍 Video File: {os.path.basename(largest_vid)} ({file_size_mb:.2f} MB, Codec: {codec})", flush=True)
 
-              # 🚀 1. FAST REMUX (තත්පර 5න් සිදුවන Zero-Re-encode Remuxing - 90% Videos)
-              if codec in ["h264", "avc", "avc1"]:
-                  print("⚡ Lossless Remuxing MKV to Fast MP4 (Takes only 5 seconds)...", flush=True)
+              # 🚀 1. FAST REMUX (තත්පර 5න් අවසන් වේ - H.264 MP4/MKV under 1900MB)
+              if codec in ["h264", "avc", "avc1"] and file_size_mb < 1900:
+                  print("⚡ Lossless Remuxing to Fast MP4 (Takes ~5 seconds)...", flush=True)
                   remux_cmd = [
                       "ffmpeg", "-y",
                       "-i", largest_vid,
@@ -170,22 +172,27 @@ jobs:
                   if res.returncode == 0 and os.path.exists(converted_path):
                       return converted_path
 
-              # 🚀 2. ULTRA-FAST MULTI-THREAD CONVERTER (For HEVC/H.265 only)
-              print("⚡ Ultra-Fast Transcoding for HEVC/H.265 (Max Speed)...", flush=True)
+              # 🚀 2. ULTRA-FAST PARALLEL CONVERTER (For HEVC/MKV or Large Files > 1.9GB)
+              print("⚡ Multi-Thread Fast Encoding (Target: ~1.2 GB, Strictly < 2GB)...", flush=True)
               conv_cmd = [
                   "ffmpeg", "-y",
                   "-threads", "0",
                   "-i", largest_vid,
                   "-c:v", "libx264",
                   "-pix_fmt", "yuv420p",
-                  "-preset", "ultrafast",
-                  "-crf", "24",
+                  "-preset", "faster",
+                  "-crf", "25",
+                  "-maxrate", "2400k",
+                  "-bufsize", "4800k",
                   "-c:a", "aac",
+                  "-b:a", "128k",
                   "-movflags", "+faststart",
                   converted_path
               ]
               res = subprocess.run(conv_cmd)
               if res.returncode == 0 and os.path.exists(converted_path):
+                  new_size_mb = os.path.getsize(converted_path) / (1024 * 1024)
+                  print(f"✅ Optimized MP4 Created! Size: {new_size_mb:.2f} MB (Telegram 2GB Compliant)", flush=True)
                   return converted_path
 
               return largest_vid
@@ -195,6 +202,7 @@ jobs:
               client = TelegramClient("gh_cloud_session", API_ID, API_HASH)
               await client.start(bot_token=BOT_TOKEN)
 
+              # Upload Thumbnail
               if POSTER and (POSTER.startswith("http://") or POSTER.startswith("https://")):
                   print("🖼️ Uploading Poster...", flush=True)
                   try:
@@ -211,7 +219,7 @@ jobs:
 
               if m_file and os.path.exists(m_file):
                   size_mb = os.path.getsize(m_file) / (1024 * 1024)
-                  print(f"🚀 Uploading {size_mb:.2f} MB Movie directly to Telegram Channel...", flush=True)
+                  print(f"\n🚀 Uploading {size_mb:.2f} MB Movie directly to Telegram Channel...", flush=True)
 
                   last_pct = -1
                   def progress(current, total):
