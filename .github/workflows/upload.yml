@@ -186,7 +186,7 @@ jobs:
               except Exception as se:
                   print(f"⚠️ Subtitle notice: {se}")
 
-          # 🎯 3. Smart Video & Audio Optimization (Standard Stereo Downmix)
+          # 🎯 3. Smart Video & Audio Optimization (Ultra-Fast 20s Engine)
           optimized_video = f"{work_dir}/cinestream_final.mp4"
 
           print("\n🔍 Analyzing video codecs and audio channels with ffprobe...", flush=True)
@@ -216,7 +216,7 @@ jobs:
 
           print(f"📊 Detected -> Video: [{video_codec}], Audio: [{audio_codec}] ({audio_channels} Channels)", flush=True)
 
-          is_v_h264 = video_codec in ["h264", "avc1"]
+          is_v_supported = video_codec in ["h264", "avc1", "hevc", "h265"]
           is_a_aac_stereo = (audio_codec in ["aac", "mp3"]) and (audio_channels <= 2)
 
           ffmpeg_cmd = ["ffmpeg", "-y", "-i", input_video]
@@ -235,14 +235,14 @@ jobs:
           else:
               sub_args = ["-map", "0:v:0", "-map", "0:a:0?"]
 
-          # Condition 1: Already H.264 + 2-Channel Stereo AAC + Under 2GB
-          if is_v_h264 and is_a_aac_stereo and input_video.endswith(".mp4") and not subtitle_file and orig_size_mb <= 2000:
-              print("⚡ [STREAM COPY]: File is already MP4 H.264 + 2-Channel Stereo AAC! Keeping original file...", flush=True)
+          # Condition 1: Already H.264/HEVC + 2-Channel Stereo AAC + Under 2000MB -> Instant Stream Copy (15s)
+          if is_v_supported and is_a_aac_stereo and input_video.endswith(".mp4") and not subtitle_file and orig_size_mb <= 2000:
+              print("⚡ [STREAM COPY]: Video is already H.264/HEVC + Stereo AAC! Instant copy...", flush=True)
               ffmpeg_cmd.extend(["-c", "copy", "-movflags", "+faststart", optimized_video])
           
-          # Condition 2: Video is H.264, but Audio is 5.1/7.1 or non-AAC -> Copy video (instant), downmix audio to 2-Channel Stereo AAC
-          elif is_v_h264 and orig_size_mb <= 2000:
-              print(f"⚡ [STREAM COPY]: Video is H.264! Copying video without re-encoding, optimizing Audio to 2-Channel Stereo AAC (-ac 2)...", flush=True)
+          # Condition 2: Video is H.264 or HEVC (x265), but Audio has 5.1/7.1 -> Copy video (instant 20s!), downmix Audio to 2-Channel Stereo AAC
+          elif is_v_supported and orig_size_mb <= 2000:
+              print(f"⚡ [HIGH-SPEED STREAM COPY]: Video is {video_codec}! Copying video directly (0 quality loss, 20s speed), downmixing Audio to 2-Channel Stereo AAC (-ac 2)...", flush=True)
               ffmpeg_cmd.extend(["-c:v", "copy"])
               if is_a_aac_stereo:
                   ffmpeg_cmd.extend(["-c:a", "copy"])
@@ -251,12 +251,12 @@ jobs:
               ffmpeg_cmd.extend(sub_args)
               ffmpeg_cmd.extend(["-movflags", "+faststart", optimized_video])
           
-          # Condition 3: Full Re-encode (HEVC/x265 -> H.264 + 2-Channel Stereo AAC)
+          # Condition 3: Full Re-encode (files > 2000MB or unsupported codecs) -> Fast 1080p Re-encode (veryfast)
           else:
-              print("🎬 [SMART BITRATE RE-ENCODE]: Re-encoding to H.264 with Standard 2-Channel Stereo AAC (-ac 2)...", flush=True)
+              print("🎬 [TURBO BITRATE RE-ENCODE]: Re-encoding to H.264 with veryfast preset + Standard 2-Channel Stereo AAC...", flush=True)
               ffmpeg_cmd.extend([
                   "-c:v", "libx264",
-                  "-preset", "faster",
+                  "-preset", "veryfast",
                   "-crf", "23",
                   "-maxrate", "2200k",
                   "-bufsize", "4400k",
@@ -274,7 +274,7 @@ jobs:
           final_size_mb = os.path.getsize(final_upload_file) / (1024 * 1024)
           print(f"\n✅ Ready for Upload! Final File Size: {final_size_mb:.2f} MB", flush=True)
 
-          # 🎯 4. Upload directly to Telegram Channel via Telethon
+          # 🎯 4. Upload directly to Telegram Channel via Telethon (8-Thread Parallel Engine)
           async def upload_to_telegram():
               print("\n🚀 Connecting to Telegram MTProto API...", flush=True)
               client = TelegramClient(
@@ -303,10 +303,52 @@ jobs:
                   except Exception as pe:
                       print(f"⚠️ Poster note: {pe}")
 
-              # Video Upload
-              print(f"\n🚀 Uploading {final_size_mb:.2f} MB Movie to Telegram ({MOVIES_CHANNEL})...", flush=True)
+              # High-Speed Parallel Telegram Upload Engine
+              print(f"\n🚀 Uploading {final_size_mb:.2f} MB Movie to Telegram via 8-Thread Parallel MTProto Engine ({MOVIES_CHANNEL})...", flush=True)
 
-              from telethon.tl.types import DocumentAttributeVideo
+              import math, random
+              from telethon.tl.types import InputFileBig, DocumentAttributeVideo
+              from telethon.tl.functions.upload import SaveBigFilePartRequest
+
+              async def parallel_upload(fpath):
+                  fsize = os.path.getsize(fpath)
+                  psize = 512 * 1024  # 512 KB chunk
+                  tot_parts = math.ceil(fsize / psize)
+                  fid = random.getrandbits(63)
+                  sem = asyncio.Semaphore(8)
+                  sent_bytes = 0
+
+                  async def _up(idx, chk):
+                      nonlocal sent_bytes
+                      async with sem:
+                          for a in range(5):
+                              try:
+                                  await client(SaveBigFilePartRequest(
+                                      file_id=fid,
+                                      file_part=idx,
+                                      file_total_parts=tot_parts,
+                                      bytes=chk
+                                  ))
+                                  sent_bytes += len(chk)
+                                  pct = (sent_bytes / fsize) * 100
+                                  cur_mb = sent_bytes / (1024 * 1024)
+                                  tot_mb = fsize / (1024 * 1024)
+                                  print(f"\r⚡ Telegram Parallel Upload: {pct:.1f}% ({cur_mb:.1f}MB / {tot_mb:.1f}MB)", end="", flush=True)
+                                  return
+                              except Exception as ex:
+                                  if a == 4:
+                                      raise ex
+                                  await asyncio.sleep(1)
+
+                  up_tasks = []
+                  with open(fpath, "rb") as fl:
+                      for i in range(tot_parts):
+                          c = fl.read(psize)
+                          up_tasks.append(_up(i, c))
+
+                  await asyncio.gather(*up_tasks)
+                  print("", flush=True)
+                  return InputFileBig(id=fid, parts=tot_parts, name=os.path.basename(fpath))
 
               # Extract video duration, width, height for instant streaming & inline player
               v_duration = 0
@@ -336,20 +378,16 @@ jobs:
                   )
               ]
 
-              def progress(current, total):
-                  pct = (current / total) * 100
-                  cur_mb = current / (1024 * 1024)
-                  tot_mb = total / (1024 * 1024)
-                  print(f"\r⚡ Telegram Upload: {pct:.1f}% ({cur_mb:.1f}MB / {tot_mb:.1f}MB)", end="", flush=True)
+              # Parallel upload video file (High-Speed Multi-connection)
+              uploaded_input_file = await parallel_upload(final_upload_file)
 
               msg = await client.send_file(
                   MOVIES_CHANNEL,
-                  final_upload_file,
+                  uploaded_input_file,
                   caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
                   parse_mode='html',
                   attributes=video_attrs,
-                  supports_streaming=True,
-                  progress_callback=progress
+                  supports_streaming=True
               )
 
               # Subtitle file upload
@@ -372,7 +410,7 @@ jobs:
               direct_stream_url = f"https://sinhalahub-backend.fly.dev/stream/{msg.id}"
 
               print("\n\n=======================================================")
-              print(f"🎉 සාර්ථකයි! චිත්රපටය Telegram Channel එකට සම්පූර්ණයෙන්ම Upload විය!")
+              print(f"🎉 සාර්ථකයි! චිත්‍රපටය Telegram Channel එකට සම්පූර්ණයෙන්ම Upload විය!")
               print(f"🔗 Direct Stream Post: {tg_post_url}")
               print(f"🆔 Telegram Message ID: {msg.id}")
               print(f"⚡ Direct Stream URL: {direct_stream_url}")
@@ -383,7 +421,6 @@ jobs:
                   print("🔄 [Firebase RTDB Auto-Sync] Updating database...", flush=True)
                   target_id = MOVIE_ID
 
-                  # Target ID එක නැතිනම්, Title එකෙන් සොයාගැනීම
                   if not target_id:
                       try:
                           res = requests.get(f"{RTDB_BASE}/movies.json", timeout=15)
