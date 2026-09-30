@@ -229,13 +229,19 @@ jobs:
                           last_pct = pct
                           print(f"⚡ Upload: {pct}% ({current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB)", flush=True)
 
+                  # 🔧 FIX: Explicit Chunk Upload (Part Size 512KB) to avoid FilePartsInvalidError
+                  uploaded_file = await client.upload_file(
+                      m_file,
+                      progress_callback=progress,
+                      part_size_kb=512
+                  )
+
                   sent_msg = await client.send_file(
                       MOVIES_CHANNEL,
-                      m_file,
+                      uploaded_file,
                       caption=f"🎥 <b>{TITLE}</b> Full Movie\n🇱🇰 CineStream Official Release",
                       parse_mode="html",
-                      supports_streaming=True,
-                      progress_callback=progress
+                      supports_streaming=True
                   )
                   print(f"\n🎉 සාර්ථකයි! සම්පූර්ණ චිත්‍රපටයම Telegram Channel එකට Upload විය! (Message ID: {sent_msg.id})", flush=True)
 
