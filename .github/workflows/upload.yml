@@ -4,12 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       title:
-        description: 'Movie Title (චිත්‍රපටයේ නම)'
+        description: 'Movie Title (චිත්රපටයේ නම)'
         required: true
         default: 'Mutiny (2026)'
       magnet:
         description: 'Download Link (Magnet, Direct MP4/Seedr, or M3U8/MPD Stream URL)'
         required: true
+      movie_id:
+        description: 'Firebase Movie ID (විකල්පයි - Admin Edit එකෙන් ලැබෙන ID එක)'
+        required: false
+        default: ''
       poster:
         description: 'Poster Image URL (විකල්පයි)'
         required: false
@@ -36,8 +40,10 @@ jobs:
           THUMBNAILS_CHANNEL: "-1003771325554"
           MOVIE_TITLE: "${{ github.event.inputs.title }}"
           DOWNLOAD_URL: "${{ github.event.inputs.magnet }}"
+          MOVIE_ID: "${{ github.event.inputs.movie_id }}"
           POSTER_URL: "${{ github.event.inputs.poster }}"
           SUBTITLE_URL: "${{ github.event.inputs.subtitle_url }}"
+          FIREBASE_RTDB_URL: "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app"
         run: |
           cat << 'EOF' > uploader.py
           import os, glob, asyncio, subprocess, sys, json, requests
@@ -50,8 +56,10 @@ jobs:
           THUMBNAILS_CHANNEL = int(os.environ["THUMBNAILS_CHANNEL"])
           TITLE = os.environ["MOVIE_TITLE"]
           URI = os.environ["DOWNLOAD_URL"].strip()
+          MOVIE_ID = os.environ.get("MOVIE_ID", "").strip()
           POSTER = os.environ.get("POSTER_URL", "").strip()
           SUBTITLE_URL = os.environ.get("SUBTITLE_URL", "").strip()
+          RTDB_BASE = os.environ.get("FIREBASE_RTDB_URL", "").rstrip("/")
 
           work_dir = "/tmp/movie_temp"
           os.makedirs(work_dir, exist_ok=True)
@@ -190,10 +198,10 @@ jobs:
               sub_args = ["-map", "0:v:0", "-map", "0:a:0?"]
 
           if is_v_h264 and is_a_aac and input_video.endswith(".mp4") and not subtitle_file and orig_size_mb <= 2000:
-              print("⚡ [STREAM COPY]: File is already MP4 H.264 + AAC! Keeping original 1.45 GB file (0 MB increase)...", flush=True)
+              print("⚡ [STREAM COPY]: File is already MP4 H.264 + AAC! Keeping original file (0 MB increase)...", flush=True)
               ffmpeg_cmd.extend(["-c", "copy", "-movflags", "+faststart", optimized_video])
           elif is_v_h264 and orig_size_mb <= 2000:
-              print("⚡ [STREAM COPY]: Video is H.264! Copying video without re-encoding (100x speed, 0 quality loss, size stays identical!)...", flush=True)
+              print("⚡ [STREAM COPY]: Video is H.264! Copying video without re-encoding (100x speed, 0 quality loss)...", flush=True)
               ffmpeg_cmd.extend(["-c:v", "copy"])
               if is_a_aac:
                   ffmpeg_cmd.extend(["-c:a", "copy"])
@@ -202,7 +210,7 @@ jobs:
               ffmpeg_cmd.extend(sub_args)
               ffmpeg_cmd.extend(["-movflags", "+faststart", optimized_video])
           else:
-              print("🎬 [SMART BITRATE RE-ENCODE]: Video is H.265/HEVC. Re-encoding with strict 2.2 Mbps bitrate cap (guaranteed < 1.6 GB)...", flush=True)
+              print("🎬 [SMART BITRATE RE-ENCODE]: Re-encoding with strict 2.2 Mbps bitrate cap (< 1.6 GB)...", flush=True)
               ffmpeg_cmd.extend([
                   "-c:v", "libx264",
                   "-preset", "faster",
@@ -237,14 +245,16 @@ jobs:
               await client.start(bot_token=BOT_TOKEN)
 
               # Poster Upload
+              thumb_msg_id = ""
               if POSTER and (POSTER.startswith("http://") or POSTER.startswith("https://")):
                   try:
-                      await client.send_file(
+                      p_msg = await client.send_file(
                           THUMBNAILS_CHANNEL,
                           POSTER,
                           caption=f"🎬 <b>{TITLE}</b>\n🇱🇰 සිංහල උපසිරැසි සහිතයි | CineStream Movie Hub",
                           parse_mode='html'
                       )
+                      thumb_msg_id = str(p_msg.id)
                       print("✅ Poster uploaded!", flush=True)
                   except Exception as pe:
                       print(f"⚠️ Poster note: {pe}")
@@ -268,23 +278,75 @@ jobs:
               )
 
               # Subtitle file upload
+              sub_msg_id = ""
               if subtitle_file and os.path.exists(subtitle_file):
                   try:
-                      await client.send_file(
+                      s_msg = await client.send_file(
                           MOVIES_CHANNEL,
                           subtitle_file,
                           caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 සිංහල උපසිරැසි ගොනුව",
                           parse_mode='html'
                       )
+                      sub_msg_id = str(s_msg.id)
+                      print("✅ Subtitle uploaded!", flush=True)
                   except Exception as se:
                       print(f"Subtitle upload note: {se}")
 
               chan_clean = str(MOVIES_CHANNEL).replace("-100", "")
+              tg_post_url = f"https://t.me/c/{chan_clean}/{msg.id}"
+              direct_stream_url = f"https://sinhalahub-backend.fly.dev/stream/{msg.id}"
+
               print("\n\n=======================================================")
-              print(f"🎉 සාර්ථකයි! චිත්‍රපටය Telegram Channel එකට සම්පූර්ණයෙන්ම Upload විය!")
-              print(f"🔗 Direct Stream Post: https://t.me/c/{chan_clean}/{msg.id}")
+              print(f"🎉 සාර්ථකයි! චිත්රපටය Telegram Channel එකට සම්පූර්ණයෙන්ම Upload විය!")
+              print(f"🔗 Direct Stream Post: {tg_post_url}")
               print(f"🆔 Telegram Message ID: {msg.id}")
+              print(f"⚡ Direct Stream URL: {direct_stream_url}")
               print("=======================================================\n", flush=True)
+
+              # 🎯 5. AUTOMATIC FIREBASE REALTIME DATABASE SYNC
+              if RTDB_BASE:
+                  print("🔄 [Firebase RTDB Auto-Sync] Updating database...", flush=True)
+                  target_id = MOVIE_ID
+
+                  # Target ID එක නැතිනම්, Title එකෙන් සොයාගැනීම
+                  if not target_id:
+                      try:
+                          res = requests.get(f"{RTDB_BASE}/movies.json", timeout=15)
+                          if res.status_code == 200 and res.json():
+                              all_m = res.json()
+                              for mid, mdata in all_m.items():
+                                  if isinstance(mdata, dict) and mdata.get("title", "").strip().lower() == TITLE.strip().lower():
+                                      target_id = mid
+                                      print(f"🎯 Matched Movie in Database: {mid} ('{TITLE}')", flush=True)
+                                      break
+                      except Exception as fe:
+                          print(f"⚠️ Search in DB warning: {fe}", flush=True)
+
+                  if target_id:
+                      patch_payload = {
+                          "telegramMessageId": str(msg.id),
+                          "telegramPostUrl": tg_post_url,
+                          "directStreamUrl": direct_stream_url,
+                      }
+                      if sub_msg_id:
+                          patch_payload["telegramSubtitleId"] = sub_msg_id
+                          patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{MOVIES_CHANNEL}/{sub_msg_id}"
+                          patch_payload["hasSinhalaSub"] = True
+
+                      try:
+                          update_res = requests.patch(
+                              f"{RTDB_BASE}/movies/{target_id}.json",
+                              json=patch_payload,
+                              timeout=15
+                          )
+                          if update_res.status_code == 200:
+                              print(f"🔥 [SUCCESS] Firebase Realtime Database ({target_id}) සාර්ථකව Live Update විය!", flush=True)
+                          else:
+                              print(f"⚠️ Firebase update response: {update_res.status_code} - {update_res.text}", flush=True)
+                      except Exception as pe:
+                          print(f"❌ Failed to patch Firebase RTDB: {pe}", flush=True)
+                  else:
+                      print("ℹ️ Movie ID සොයාගත නොහැකි වූ බැවින් Database update වීම මගහැරිණි.", flush=True)
 
               await client.disconnect()
 
