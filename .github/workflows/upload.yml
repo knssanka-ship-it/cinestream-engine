@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       title:
-        description: 'Movie Title (චිත්‍රපටයේ නම)'
+        description: 'Movie Title (චිත්රපටයේ නම)'
         required: true
         default: 'Mutiny (2026)'
       magnet:
@@ -186,18 +186,19 @@ jobs:
               except Exception as se:
                   print(f"⚠️ Subtitle notice: {se}")
 
-          # 🎯 3. Smart Video Optimization
+          # 🎯 3. Smart Video & Audio Optimization (Standard Stereo Downmix)
           optimized_video = f"{work_dir}/cinestream_final.mp4"
 
-          print("\n🔍 Analyzing video codecs with ffprobe...", flush=True)
+          print("\n🔍 Analyzing video codecs and audio channels with ffprobe...", flush=True)
           probe_cmd = [
               "ffprobe", "-v", "error",
-              "-show_entries", "stream=index,codec_type,codec_name",
+              "-show_entries", "stream=index,codec_type,codec_name,channels",
               "-of", "json", input_video
           ]
           probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
           video_codec = ""
           audio_codec = ""
+          audio_channels = 2
           try:
               data = json.loads(probe_res.stdout)
               for s in data.get("streams", []):
@@ -205,13 +206,18 @@ jobs:
                       video_codec = s.get("codec_name", "").lower()
                   elif s.get("codec_type") == "audio" and not audio_codec:
                       audio_codec = s.get("codec_name", "").lower()
+                      if s.get("channels"):
+                          try:
+                              audio_channels = int(s.get("channels"))
+                          except Exception:
+                              pass
           except Exception as pe:
               print(f"ffprobe warning: {pe}")
 
-          print(f"📊 Detected -> Video: [{video_codec}], Audio: [{audio_codec}]", flush=True)
+          print(f"📊 Detected -> Video: [{video_codec}], Audio: [{audio_codec}] ({audio_channels} Channels)", flush=True)
 
           is_v_h264 = video_codec in ["h264", "avc1"]
-          is_a_aac = audio_codec in ["aac", "mp3"]
+          is_a_aac_stereo = (audio_codec in ["aac", "mp3"]) and (audio_channels <= 2)
 
           ffmpeg_cmd = ["ffmpeg", "-y", "-i", input_video]
 
@@ -229,20 +235,25 @@ jobs:
           else:
               sub_args = ["-map", "0:v:0", "-map", "0:a:0?"]
 
-          if is_v_h264 and is_a_aac and input_video.endswith(".mp4") and not subtitle_file and orig_size_mb <= 2000:
-              print("⚡ [STREAM COPY]: File is already MP4 H.264 + AAC! Keeping original file (0 MB increase)...", flush=True)
+          # Condition 1: Already H.264 + 2-Channel Stereo AAC + Under 2GB
+          if is_v_h264 and is_a_aac_stereo and input_video.endswith(".mp4") and not subtitle_file and orig_size_mb <= 2000:
+              print("⚡ [STREAM COPY]: File is already MP4 H.264 + 2-Channel Stereo AAC! Keeping original file...", flush=True)
               ffmpeg_cmd.extend(["-c", "copy", "-movflags", "+faststart", optimized_video])
+          
+          # Condition 2: Video is H.264, but Audio is 5.1/7.1 or non-AAC -> Copy video (instant), downmix audio to 2-Channel Stereo AAC
           elif is_v_h264 and orig_size_mb <= 2000:
-              print("⚡ [STREAM COPY]: Video is H.264! Copying video without re-encoding (100x speed, 0 quality loss)...", flush=True)
+              print(f"⚡ [STREAM COPY]: Video is H.264! Copying video without re-encoding, optimizing Audio to 2-Channel Stereo AAC (-ac 2)...", flush=True)
               ffmpeg_cmd.extend(["-c:v", "copy"])
-              if is_a_aac:
+              if is_a_aac_stereo:
                   ffmpeg_cmd.extend(["-c:a", "copy"])
               else:
-                  ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "160k"])
+                  ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "160k", "-ac", "2"])
               ffmpeg_cmd.extend(sub_args)
               ffmpeg_cmd.extend(["-movflags", "+faststart", optimized_video])
+          
+          # Condition 3: Full Re-encode (HEVC/x265 -> H.264 + 2-Channel Stereo AAC)
           else:
-              print("🎬 [SMART BITRATE RE-ENCODE]: Re-encoding with strict 2.2 Mbps bitrate cap (< 1.6 GB)...", flush=True)
+              print("🎬 [SMART BITRATE RE-ENCODE]: Re-encoding to H.264 with Standard 2-Channel Stereo AAC (-ac 2)...", flush=True)
               ffmpeg_cmd.extend([
                   "-c:v", "libx264",
                   "-preset", "faster",
@@ -250,7 +261,8 @@ jobs:
                   "-maxrate", "2200k",
                   "-bufsize", "4400k",
                   "-c:a", "aac",
-                  "-b:a", "128k"
+                  "-b:a", "128k",
+                  "-ac", "2"
               ])
               ffmpeg_cmd.extend(sub_args)
               ffmpeg_cmd.extend(["-movflags", "+faststart", optimized_video])
@@ -360,7 +372,7 @@ jobs:
               direct_stream_url = f"https://sinhalahub-backend.fly.dev/stream/{msg.id}"
 
               print("\n\n=======================================================")
-              print(f"🎉 සාර්ථකයි! චිත්‍රපටය Telegram Channel එකට සම්පූර්ණයෙන්ම Upload විය!")
+              print(f"🎉 සාර්ථකයි! චිත්රපටය Telegram Channel එකට සම්පූර්ණයෙන්ම Upload විය!")
               print(f"🔗 Direct Stream Post: {tg_post_url}")
               print(f"🆔 Telegram Message ID: {msg.id}")
               print(f"⚡ Direct Stream URL: {direct_stream_url}")
