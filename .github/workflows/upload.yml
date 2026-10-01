@@ -30,7 +30,7 @@ jobs:
       - name: 🛠️ Setup Fast Engines & Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y aria2 ffmpeg unzip
+          sudo apt-get install -y --no-install-recommends aria2
           pip install --no-cache-dir telethon cryptg requests yt-dlp faster-whisper numpy
 
       - name: 🚀 Media Download, Smart FFmpeg Optimizer & Telegram 2GB Upload
