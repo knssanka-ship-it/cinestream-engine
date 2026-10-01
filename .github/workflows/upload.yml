@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y aria2 ffmpeg unzip
-          pip install telethon cryptg requests yt-dlp
+          pip install telethon cryptg requests yt-dlp faster-whisper
 
       - name: 🚀 Media Download, Smart FFmpeg Optimizer & Telegram 2GB Upload
         env:
@@ -185,6 +185,78 @@ jobs:
                       print(f"✅ Sinhala Subtitle saved: {subtitle_file}", flush=True)
               except Exception as se:
                   print(f"⚠️ Subtitle notice: {se}")
+
+          # 🎯 2.1 Check for Embedded English Subtitles or Generate via 100% Free Faster-Whisper AI
+          english_sub_file = None
+          print("🔍 Checking for embedded English subtitles in input file...", flush=True)
+          sub_probe = subprocess.run(
+              ["ffprobe", "-v", "error", "-show_entries", "stream=index,codec_name:stream_tags=language,title", "-select_streams", "s", "-of", "json", input_video],
+              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+          )
+          embedded_sub_idx = None
+          try:
+              s_data = json.loads(sub_probe.stdout)
+              for st in s_data.get("streams", []):
+                  lang = st.get("tags", {}).get("language", "").lower()
+                  title_tag = st.get("tags", {}).get("title", "").lower()
+                  if "eng" in lang or "en" in lang or "english" in title_tag:
+                      embedded_sub_idx = st.get("index")
+                      break
+                  elif embedded_sub_idx is None:
+                      embedded_sub_idx = st.get("index")
+          except Exception as spe:
+              print(f"Notice on subtitle probe: {spe}")
+
+          if embedded_sub_idx is not None:
+              print(f"⚡ [INSTANT SUBTITLE EXTRACTION] Found embedded subtitle track (stream #{embedded_sub_idx})! Extracting to .srt (1s)...", flush=True)
+              extracted_sub = f"{work_dir}/english_sub.srt"
+              ext_res = subprocess.run(["ffmpeg", "-y", "-i", input_video, "-map", f"0:{embedded_sub_idx}", extracted_sub], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              if ext_res.returncode == 0 and os.path.exists(extracted_sub) and os.path.getsize(extracted_sub) > 100:
+                  english_sub_file = extracted_sub
+                  print(f"✅ Extracted official English Subtitle ({os.path.getsize(english_sub_file)/1024:.1f} KB)!", flush=True)
+
+          # If no embedded subtitle, generate using 100% Free Faster-Whisper on GitHub CPU (0 Tokens, 0 Cost)
+          if not english_sub_file:
+              print("🤖 [AI AUTO-SUBTITLES] Generating English Subtitles via Free Local Faster-Whisper AI...", flush=True)
+              try:
+                  speech_audio = f"{work_dir}/speech_16k.wav"
+                  # Extract lightweight 16kHz mono audio for Whisper in 2 seconds
+                  subprocess.run([
+                      "ffmpeg", "-y", "-i", input_video,
+                      "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                      speech_audio
+                  ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                  if os.path.exists(speech_audio):
+                      from faster_whisper import WhisperModel
+                      print("🧠 Loading Faster-Whisper base.en model (100% Free, Unlimited, 0 Tokens)...", flush=True)
+                      model = WhisperModel("base.en", device="cpu", compute_type="int8")
+                      segments, info = model.transcribe(speech_audio, beam_size=1, language="en")
+
+                      gen_sub = f"{work_dir}/english_ai_sub.srt"
+                      with open(gen_sub, "w", encoding="utf-8") as sf:
+                          s_idx = 1
+                          for seg in segments:
+                              s_h, s_m = int(seg.start // 3600), int((seg.start % 3600) // 60)
+                              s_s, s_ms = int(seg.start % 60), int((seg.start - int(seg.start)) * 1000)
+                              e_h, e_m = int(seg.end // 3600), int((seg.end % 3600) // 60)
+                              e_s, e_ms = int(seg.end % 60), int((seg.end - int(seg.end)) * 1000)
+                              t_start = f"{s_h:02d}:{s_m:02d}:{s_s:02d},{s_ms:03d}"
+                              t_end = f"{e_h:02d}:{e_m:02d}:{e_s:02d},{e_ms:03d}"
+                              txt = seg.text.strip()
+                              if txt:
+                                  sf.write(f"{s_idx}\n{t_start} --> {t_end}\n{txt}\n\n")
+                                  s_idx += 1
+
+                      if os.path.exists(gen_sub) and os.path.getsize(gen_sub) > 100:
+                          english_sub_file = gen_sub
+                          print(f"✅ AI Auto-Generated English Subtitles successfully ({s_idx} lines)!", flush=True)
+                      try:
+                          os.remove(speech_audio)
+                      except Exception:
+                          pass
+              except Exception as w_err:
+                  print(f"⚠️ Faster-Whisper notice: {w_err}", flush=True)
 
           # 🎯 3. Smart Video & Audio Optimization (Ultra-Fast 20s Engine)
           optimized_video = f"{work_dir}/cinestream_final.mp4"
@@ -390,20 +462,34 @@ jobs:
                   supports_streaming=True
               )
 
-              # Subtitle file upload
-              sub_msg_id = ""
+              # Subtitle file uploads to THUMBNAILS_CHANNEL
+              sinhala_sub_msg_id = ""
               if subtitle_file and os.path.exists(subtitle_file):
                   try:
                       s_msg = await client.send_file(
-                          MOVIES_CHANNEL,
+                          THUMBNAILS_CHANNEL,
                           subtitle_file,
                           caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 සිංහල උපසිරැසි ගොනුව",
                           parse_mode='html'
                       )
-                      sub_msg_id = str(s_msg.id)
-                      print("✅ Subtitle uploaded!", flush=True)
+                      sinhala_sub_msg_id = str(s_msg.id)
+                      print(f"✅ Sinhala Subtitle uploaded to Thumbnails Channel ({sinhala_sub_msg_id})!", flush=True)
                   except Exception as se:
                       print(f"Subtitle upload note: {se}")
+
+              english_sub_msg_id = ""
+              if english_sub_file and os.path.exists(english_sub_file):
+                  try:
+                      e_msg = await client.send_file(
+                          THUMBNAILS_CHANNEL,
+                          english_sub_file,
+                          caption=f"🔤 <b>{TITLE}</b> English Subtitle (.srt)\n⚡ CineStream Auto-Subtitles",
+                          parse_mode='html'
+                      )
+                      english_sub_msg_id = str(e_msg.id)
+                      print(f"✅ English Subtitle uploaded to Thumbnails Channel ({english_sub_msg_id})!", flush=True)
+                  except Exception as ee:
+                      print(f"English Subtitle upload note: {ee}")
 
               chan_clean = str(MOVIES_CHANNEL).replace("-100", "")
               tg_post_url = f"https://t.me/cinestream_lk/{msg.id}"
@@ -440,10 +526,16 @@ jobs:
                           "telegramPostUrl": tg_post_url,
                           "directStreamUrl": direct_stream_url,
                       }
-                      if sub_msg_id:
-                          patch_payload["telegramSubtitleId"] = sub_msg_id
-                          patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{MOVIES_CHANNEL}/{sub_msg_id}"
+                      if sinhala_sub_msg_id:
+                          patch_payload["telegramSubtitleId"] = sinhala_sub_msg_id
+                          patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{sinhala_sub_msg_id}"
                           patch_payload["hasSinhalaSub"] = True
+
+                      if english_sub_msg_id:
+                          patch_payload["telegramEnglishSubtitleId"] = english_sub_msg_id
+                          patch_payload["englishSubtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
+                          if not sinhala_sub_msg_id:
+                              patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
 
                       try:
                           update_res = requests.patch(
@@ -451,7 +543,7 @@ jobs:
                               json=patch_payload,
                               timeout=15
                           )
-                          if update_res.status_code == 200:
+                          if update_res.status_code in [200, 204]:
                               print(f"🔥 [SUCCESS] Firebase Realtime Database ({target_id}) සාර්ථකව Live Update විය!", flush=True)
                           else:
                               print(f"⚠️ Firebase update response: {update_res.status_code} - {update_res.text}", flush=True)
