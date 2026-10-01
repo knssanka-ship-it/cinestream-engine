@@ -361,6 +361,8 @@ jobs:
                           "gemini-3.5-flash",
                           "gemini-3.1-flash-lite",
                           "gemini-3.5-flash-lite",
+                          "gemini-3.5-flash",
+                          "gemini-3.1-flash-lite",
                           "gemini-2.5-flash"
                       ]
 
@@ -368,12 +370,12 @@ jobs:
                           model_name = models_to_try[attempt]
                           try:
                               g_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                              gen_cfg = {"temperature": 0.2}
+                              if "2.5" in model_name:
+                                  gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
                               payload = {
                                   "contents": [{"parts": [{"text": prompt}]}],
-                                  "generationConfig": {
-                                      "thinkingConfig": {"thinkingBudget": 0},
-                                      "temperature": 0.2
-                                  }
+                                  "generationConfig": gen_cfg
                               }
                               g_res = requests.post(g_url, json=payload, headers={"Content-Type": "application/json"}, timeout=90)
                               if g_res.status_code == 200:
@@ -387,15 +389,12 @@ jobs:
                                           trans_chunk = part_text
                                           break
                               elif g_res.status_code == 429:
-                                  # Intelligent rate-limit cooldown
-                                  cooldown = 15 * (attempt + 1)
+                                  cooldown = 15
                                   print(f"[RateLimit 429 - waiting {cooldown}s...]", end="", flush=True)
                                   time.sleep(cooldown)
-                                  continue
                               elif g_res.status_code == 503:
-                                  print(f"[Busy 503 - waiting 10s...]", end="", flush=True)
-                                  time.sleep(10)
-                                  continue
+                                  print(f"[Busy 503 - waiting 8s...]", end="", flush=True)
+                                  time.sleep(8)
                               else:
                                   print(f"[{model_name} HTTP {g_res.status_code}]", end="", flush=True)
                           except Exception as ce:
