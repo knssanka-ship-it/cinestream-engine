@@ -30,7 +30,7 @@ jobs:
       - name: 🛠️ Setup Fast Engines & Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends aria2
+          sudo apt-get install -y --no-install-recommends ffmpeg aria2
           pip install --no-cache-dir telethon cryptg requests yt-dlp faster-whisper numpy
 
       - name: 🚀 Media Download, Smart FFmpeg Optimizer & Telegram 2GB Upload
@@ -226,12 +226,12 @@ jobs:
           # 🎯 2.1 Check for ALL Embedded Subtitle tracks in input video
           if not subtitle_file and not english_sub_file:
               print("🔍 Checking for all embedded subtitle tracks in input file...", flush=True)
-              sub_probe = subprocess.run(
-                  ["ffprobe", "-v", "error", "-show_entries", "stream=index,codec_name:stream_tags=language,title", "-select_streams", "s", "-of", "json", input_video],
-                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-              )
               candidate_tracks = []
               try:
+                  sub_probe = subprocess.run(
+                      ["ffprobe", "-v", "error", "-show_entries", "stream=index,codec_name:stream_tags=language,title", "-select_streams", "s", "-of", "json", input_video],
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                  )
                   s_data = json.loads(sub_probe.stdout)
                   for st in s_data.get("streams", []):
                       s_idx = st.get("index")
