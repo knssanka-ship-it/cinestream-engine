@@ -334,7 +334,7 @@ jobs:
                   total_blocks = len(blocks)
                   print(f"📊 Found {total_blocks} subtitle cues to translate into Cinematic Sinhala.", flush=True)
 
-                  chunk_size = 120
+                  chunk_size = 50
                   translated_blocks = []
 
                   for c_idx in range(0, total_blocks, chunk_size):
@@ -356,11 +356,19 @@ jobs:
                       )
 
                       trans_chunk = ""
+                      models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
                       for attempt in range(3):
+                          model_name = models_to_try[min(attempt, len(models_to_try)-1)]
                           try:
-                              g_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-                              payload = {"contents": [{"parts": [{"text": prompt}]}]}
-                              g_res = requests.post(g_url, json=payload, headers={"Content-Type": "application/json"}, timeout=45)
+                              g_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                              payload = {
+                                  "contents": [{"parts": [{"text": prompt}]}],
+                                  "generationConfig": {
+                                      "thinkingConfig": {"thinkingBudget": 0},
+                                      "temperature": 0.2
+                                  }
+                              }
+                              g_res = requests.post(g_url, json=payload, headers={"Content-Type": "application/json"}, timeout=90)
                               if g_res.status_code == 200:
                                   g_data = g_res.json()
                                   candidates = g_data.get("candidates", [])
@@ -368,13 +376,13 @@ jobs:
                                       part_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                                       part_text = re.sub(r"^```[a-zA-Z]*\n", "", part_text.strip())
                                       part_text = re.sub(r"\n```$", "", part_text.strip())
-                                      if part_text:
+                                      if part_text and len(part_text) > 20:
                                           trans_chunk = part_text
                                           break
                               else:
-                                  print(f"[HTTP {g_res.status_code}]", end="", flush=True)
+                                  print(f"[{model_name} HTTP {g_res.status_code}]", end="", flush=True)
                           except Exception as ce:
-                              print(f"[Retry {attempt+1}]", end="", flush=True)
+                              print(f"[{model_name} Retry {attempt+1}: {type(ce).__name__}]", end="", flush=True)
                           time.sleep(2)
 
                       if trans_chunk:
