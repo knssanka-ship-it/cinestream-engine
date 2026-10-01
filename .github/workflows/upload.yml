@@ -334,7 +334,7 @@ jobs:
                   total_blocks = len(blocks)
                   print(f"📊 Found {total_blocks} subtitle cues to translate into Cinematic Sinhala.", flush=True)
 
-                  chunk_size = 50
+                  chunk_size = 75
                   translated_blocks = []
 
                   for c_idx in range(0, total_blocks, chunk_size):
@@ -356,9 +356,17 @@ jobs:
                       )
 
                       trans_chunk = ""
-                      models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
-                      for attempt in range(3):
-                          model_name = models_to_try[min(attempt, len(models_to_try)-1)]
+                      # Valid models confirmed on this API endpoint
+                      models_to_try = [
+                          "gemini-2.5-flash",
+                          "gemini-2.5-flash-lite",
+                          "gemini-flash-latest",
+                          "gemini-2.5-flash",
+                          "gemini-2.5-flash-lite"
+                      ]
+
+                      for attempt in range(len(models_to_try)):
+                          model_name = models_to_try[attempt]
                           try:
                               g_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
                               payload = {
@@ -379,11 +387,21 @@ jobs:
                                       if part_text and len(part_text) > 20:
                                           trans_chunk = part_text
                                           break
+                              elif g_res.status_code == 429:
+                                  # Intelligent rate-limit cooldown
+                                  cooldown = 15 * (attempt + 1)
+                                  print(f"[RateLimit 429 - waiting {cooldown}s...]", end="", flush=True)
+                                  time.sleep(cooldown)
+                                  continue
+                              elif g_res.status_code == 503:
+                                  print(f"[Busy 503 - waiting 10s...]", end="", flush=True)
+                                  time.sleep(10)
+                                  continue
                               else:
                                   print(f"[{model_name} HTTP {g_res.status_code}]", end="", flush=True)
                           except Exception as ce:
                               print(f"[{model_name} Retry {attempt+1}: {type(ce).__name__}]", end="", flush=True)
-                          time.sleep(2)
+                          time.sleep(3)
 
                       if trans_chunk:
                           translated_blocks.append(trans_chunk)
@@ -391,6 +409,9 @@ jobs:
                       else:
                           translated_blocks.append(chunk_text)
                           print(" ⚠️ (fallback)", flush=True)
+
+                      # Safe 4-second pacing between batches to respect 15 RPM quota
+                      time.sleep(4)
 
                   if translated_blocks:
                       cinematic_sub_path = f"{work_dir}/sinhala_cinematic_sub.srt"
