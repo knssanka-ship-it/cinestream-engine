@@ -294,9 +294,10 @@ jobs:
                           audio_np = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
 
                       from faster_whisper import WhisperModel
-                      print(f"🧠 Loading Faster-Whisper tiny.en model (Audio length: {len(audio_np)/16000:.1f}s)...", flush=True)
+                      print(f"🧠 Loading Faster-Whisper tiny.en model (Full Audio length: {len(audio_np)/16000:.1f}s)...", flush=True)
                       model = WhisperModel("tiny.en", device="cpu", compute_type="int8", cpu_threads=4)
-                      segments, info = model.transcribe(audio_np, beam_size=1, language="en", vad_filter=True)
+                      # vad_filter=False ensures zero dropped dialogue, capturing every sentence from start to finish
+                      segments, info = model.transcribe(audio_np, beam_size=1, language="en", vad_filter=False)
 
                       gen_sub = f"{work_dir}/english_ai_sub.srt"
                       with open(gen_sub, "w", encoding="utf-8") as sf:
