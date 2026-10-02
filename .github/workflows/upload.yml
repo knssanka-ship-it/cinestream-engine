@@ -685,15 +685,72 @@ jobs:
                   except Exception as ee:
                       print(f"English Subtitle upload note: {ee}")
 
+              # 📱 4.5 ENCODE & UPLOAD 480p MOBILE DATA SAVER (400 MB - 600 MB Fast Download)
+              msg_480p_id = ""
+              file_480p = f"{work_dir}/movie_480p.mp4"
+              size_480_str = ""
+              try:
+                  print("\n📱 [Mobile Saver Engine] Encoding 480p fast-download copy (Target: 400MB - 600MB)...", flush=True)
+                  enc_480_cmd = [
+                      "ffmpeg", "-y", "-i", final_upload_file,
+                      "-vf", "scale=-2:480",
+                      "-c:v", "libx264", "-crf", "27", "-preset", "veryfast",
+                      "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+                      "-movflags", "+faststart",
+                      file_480p
+                  ]
+                  t_start_enc = time.time()
+                  enc_proc = subprocess.run(enc_480_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                  if enc_proc.returncode == 0 and os.path.exists(file_480p) and os.path.getsize(file_480p) > 5 * 1024 * 1024:
+                      f480_bytes = os.path.getsize(file_480p)
+                      size_480_mb = f480_bytes / (1024 * 1024)
+                      size_480_str = f"{size_480_mb:.0f} MB"
+                      print(f"✅ 480p Mobile Saver encoded in {time.time() - t_start_enc:.1f}s! Size: {size_480_str}", flush=True)
+
+                      video_attrs_480p = [
+                          DocumentAttributeVideo(
+                              duration=v_duration,
+                              w=854,
+                              h=480,
+                              supports_streaming=True
+                          )
+                      ]
+                      uploaded_480p_input = await parallel_upload(file_480p)
+                      msg_480p = await client.send_file(
+                          MOVIES_CHANNEL,
+                          uploaded_480p_input,
+                          caption=f"📱 <b>{TITLE}</b> (480p Mobile Data Saver)\n⚡ Fast Download Release ({size_480_str})\n🇱🇰 CineStream Official",
+                          parse_mode='html',
+                          attributes=video_attrs_480p,
+                          supports_streaming=True
+                      )
+                      msg_480p_id = str(msg_480p.id)
+                      print(f"✅ 480p Mobile Saver uploaded! Telegram Msg ID: {msg_480p_id}", flush=True)
+                  else:
+                      print(f"⚠️ 480p encoding note: {enc_proc.stderr[:160] if enc_proc.stderr else 'skipped'}", flush=True)
+              except Exception as enc_e:
+                  print(f"⚠️ 480p encoding notice: {enc_e}", flush=True)
+              finally:
+                  if os.path.exists(file_480p):
+                      try:
+                          os.remove(file_480p)
+                          print("🧹 Temporary 480p file cleaned from disk.", flush=True)
+                      except Exception:
+                          pass
+
               chan_clean = str(MOVIES_CHANNEL).replace("-100", "")
               tg_post_url = f"https://t.me/cinestream_lk/{msg.id}"
               direct_stream_url = f"https://sinhalahub-backend.fly.dev/stream/{msg.id}"
+              direct_download_480p_url = f"https://sinhalahub-backend.fly.dev/download/{msg_480p_id}" if msg_480p_id else ""
 
               print("\n\n=======================================================")
               print(f"🎉 සාර්ථකයි! චිත්‍රපටය Telegram Channel එකට සම්පූර්ණයෙන්ම Upload විය!")
               print(f"🔗 Direct Stream Post: {tg_post_url}")
               print(f"🆔 Telegram Message ID: {msg.id}")
               print(f"⚡ Direct Stream URL: {direct_stream_url}")
+              if msg_480p_id:
+                  print(f"📱 480p Mobile Download Msg ID: {msg_480p_id} ({size_480_str})")
+                  print(f"📥 480p Download URL: {direct_download_480p_url}")
               print("=======================================================\n", flush=True)
 
               # 🎯 5. AUTOMATIC FIREBASE REALTIME DATABASE SYNC
@@ -721,6 +778,10 @@ jobs:
                           "telegramPostUrl": tg_post_url,
                           "directStreamUrl": direct_stream_url,
                       }
+                      if msg_480p_id:
+                          patch_payload["telegramDownload480pId"] = str(msg_480p_id)
+                          patch_payload["downloadUrl480p"] = direct_download_480p_url
+                          patch_payload["downloadSize480p"] = size_480_str
                       if sinhala_sub_msg_id:
                           patch_payload["telegramSubtitleId"] = sinhala_sub_msg_id
                           patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{sinhala_sub_msg_id}"
