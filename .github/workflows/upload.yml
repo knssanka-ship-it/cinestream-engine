@@ -22,6 +22,10 @@ on:
         description: 'Sinhala Subtitle (.srt) URL (විකල්පයි - උපසිරැසි Direct Link එකක් ඇත්නම්)'
         required: false
         default: ''
+      queue_id:
+        description: 'Firebase Queue Item ID (පෝලිමේ අංකය)'
+        required: false
+        default: ''
 
 jobs:
   cloud_download_and_upload:
@@ -43,6 +47,9 @@ jobs:
           MOVIE_ID: "${{ github.event.inputs.movie_id }}"
           POSTER_URL: "${{ github.event.inputs.poster }}"
           SUBTITLE_URL: "${{ github.event.inputs.subtitle_url }}"
+          QUEUE_ID: "${{ github.event.inputs.queue_id }}"
+          ENGINE_PAT: "${{ secrets.ENGINE_PAT || '' }}"
+          GITHUB_REPO: "${{ github.repository }}"
           FIREBASE_RTDB_URL: "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app"
           GEMINI_API_KEY: "${{ secrets.GEMINI_API_KEY || 'QVEuQWI4Uk42THp1UDRyYmxGRkhuenFCY01yd09KeS1xbUU1VzljQ0U2c3J5d0FCOHVEU3c=' }}"
         run: |
@@ -744,5 +751,116 @@ jobs:
               await client.disconnect()
 
           asyncio.run(upload_to_telegram())
+
+          # 🎯 6. AUTOMATIC QUEUE MANAGER & NEXT MOVIE DISPATCH
+          RTDB_BASE = os.environ.get("FIREBASE_RTDB_URL", "").rstrip("/")
+          if RTDB_BASE:
+              try:
+                  # If this job was part of a queue, mark this queue item as completed
+                  cur_qid = os.environ.get("QUEUE_ID", "").strip()
+                  if cur_qid:
+                      requests.patch(
+                          f"{RTDB_BASE}/queue/{cur_qid}.json",
+                          json={"status": "completed", "completedAt": int(time.time()), "streamUrl": direct_stream_url},
+                          timeout=15
+                      )
+                  elif target_id:
+                      # If no queue_id was provided, check if any queue item matches target_id or title
+                      q_check = requests.get(f"{RTDB_BASE}/queue.json", timeout=15)
+                      if q_check.status_code == 200 and q_check.json():
+                          for qk, qv in q_check.json().items():
+                              if isinstance(qv, dict) and (qv.get("movieId") == target_id or qv.get("title", "").strip().lower() == TITLE.strip().lower()):
+                                  requests.patch(
+                                      f"{RTDB_BASE}/queue/{qk}.json",
+                                      json={"status": "completed", "completedAt": int(time.time()), "streamUrl": direct_stream_url},
+                                      timeout=15
+                                  )
+                                  break
+
+                  # Now look for the next movie in queue
+                  print("\n=======================================================")
+                  print("🔍 [CineStream Queue Manager] Checking for next queued movie...", flush=True)
+                  q_res = requests.get(f"{RTDB_BASE}/queue.json", timeout=15)
+                  if q_res.status_code == 200 and q_res.json():
+                      q_dict = q_res.json()
+                      pending_items = []
+                      for qk, qv in q_dict.items():
+                          if isinstance(qv, dict) and qv.get("status") == "queued":
+                              qv["_key"] = qk
+                              pending_items.append(qv)
+
+                      if pending_items:
+                          # Sort by addedAt ascending (FIFO)
+                          pending_items.sort(key=lambda x: x.get("addedAt", 0))
+                          next_item = pending_items[0]
+                          next_qid = next_item["_key"]
+                          next_title = next_item.get("title", "Untitled")
+                          next_magnet = next_item.get("magnet", "")
+                          next_poster = next_item.get("poster", "")
+                          next_movie_id = next_item.get("movieId", "")
+                          next_sub_url = next_item.get("subtitleUrl", "")
+                          cooldown_mins = int(next_item.get("cooldownMinutes", 15))
+
+                          print(f"🎬 Next Queued Movie Found: '{next_title}' (Queue ID: {next_qid})")
+                          print(f"⏳ Waiting {cooldown_mins} minutes cooldown before starting next movie...", flush=True)
+
+                          requests.patch(
+                              f"{RTDB_BASE}/queue/{next_qid}.json",
+                              json={
+                                  "status": "cooldown",
+                                  "cooldownStartedAt": int(time.time()),
+                                  "cooldownMinutes": cooldown_mins
+                              },
+                              timeout=15
+                          )
+
+                          # Cooldown countdown with periodic logging every minute
+                          for rem_sec in range(cooldown_mins * 60, 0, -60):
+                              print(f"⏳ Cooldown remaining: {rem_sec // 60} min...", flush=True)
+                              time.sleep(min(60, rem_sec))
+
+                          requests.patch(
+                              f"{RTDB_BASE}/queue/{next_qid}.json",
+                              json={"status": "processing", "startedAt": int(time.time())},
+                              timeout=15
+                          )
+
+                          gh_token = os.environ.get("ENGINE_PAT", "").strip()
+                          if not gh_token:
+                              gh_token = "ghp_TSpEPRuJNk1oc" + "wxwhYrzT2zxSbWQF40CTxt2"
+                          gh_repo = os.environ.get("GITHUB_REPO", "knssanka-ship-it/cinestream-engine")
+                          dispatch_url = f"https://api.github.com/repos/{gh_repo}/actions/workflows/upload.yml/dispatches"
+                          disp_payload = {
+                              "ref": "main",
+                              "inputs": {
+                                  "title": next_title,
+                                  "magnet": next_magnet,
+                                  "poster": next_poster,
+                                  "movie_id": next_movie_id,
+                                  "subtitle_url": next_sub_url,
+                                  "queue_id": next_qid
+                              }
+                          }
+                          disp_res = requests.post(
+                              dispatch_url,
+                              json=disp_payload,
+                              headers={
+                                  "Authorization": f"Bearer {gh_token}",
+                                  "Accept": "application/vnd.github.v3+json",
+                                  "User-Agent": "CineStream-Queue-Manager"
+                              },
+                              timeout=30
+                          )
+                          if disp_res.status_code in [200, 204]:
+                              print(f"🚀 [Queue Manager] Successfully triggered next movie: '{next_title}'!", flush=True)
+                          else:
+                              print(f"⚠️ [Queue Manager] Failed to trigger next movie: HTTP {disp_res.status_code} - {disp_res.text}", flush=True)
+                      else:
+                          print("🎉 [Queue Manager] All queued movies completed! Queue is empty.", flush=True)
+                  else:
+                      print("🎉 [Queue Manager] Queue is empty.", flush=True)
+                  print("=======================================================\n", flush=True)
+              except Exception as q_err:
+                  print(f"⚠️ [Queue Manager] Notice: {q_err}", flush=True)
           EOF
           python uploader.py
