@@ -541,7 +541,11 @@ jobs:
           print(f"\n✅ Ready for Upload! Final File Size: {final_size_mb:.2f} MB", flush=True)
 
           # 🎯 4. Upload directly to Telegram Channel via Telethon
+          target_id = MOVIE_ID
+          direct_stream_url = ""
+
           async def upload_to_telegram():
+              global target_id, direct_stream_url
               print("\n🚀 Connecting to Telegram MTProto API...", flush=True)
               client = TelegramClient(
                   'gh_cloud_session',
@@ -825,18 +829,23 @@ jobs:
                           json={"status": "completed", "completedAt": int(time.time()), "streamUrl": direct_stream_url},
                           timeout=15
                       )
-                  elif target_id:
-                      # If no queue_id was provided, check if any queue item matches target_id or title
+                  else:
+                      # If no queue_id was provided, check if any queue item matches target_id, title or is processing
                       q_check = requests.get(f"{RTDB_BASE}/queue.json", timeout=15)
                       if q_check.status_code == 200 and q_check.json():
                           for qk, qv in q_check.json().items():
-                              if isinstance(qv, dict) and (qv.get("movieId") == target_id or qv.get("title", "").strip().lower() == TITLE.strip().lower()):
-                                  requests.patch(
-                                      f"{RTDB_BASE}/queue/{qk}.json",
-                                      json={"status": "completed", "completedAt": int(time.time()), "streamUrl": direct_stream_url},
-                                      timeout=15
-                                  )
-                                  break
+                              if isinstance(qv, dict):
+                                  match_id = target_id and qv.get("movieId") == target_id
+                                  match_title = qv.get("title", "").strip().lower() == TITLE.strip().lower()
+                                  match_proc = qv.get("status") == "processing"
+                                  if match_id or match_title or match_proc:
+                                      requests.patch(
+                                          f"{RTDB_BASE}/queue/{qk}.json",
+                                          json={"status": "completed", "completedAt": int(time.time()), "streamUrl": direct_stream_url},
+                                          timeout=15
+                                      )
+                                      print(f"✅ Marked queue item {qk} ('{qv.get('title')}') as completed!", flush=True)
+                                      break
 
                   # Now look for the next movie in queue
                   print("\n=======================================================")
