@@ -35,7 +35,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ffmpeg aria2
-          pip install --no-cache-dir telethon cryptg requests yt-dlp faster-whisper numpy
+          pip install --no-cache-dir telethon cryptg requests yt-dlp faster-whisper numpy ffsubsync
 
       - name: 🚀 Media Download, Smart FFmpeg Optimizer & Telegram 2GB Upload
         env:
@@ -207,6 +207,88 @@ jobs:
           orig_size_mb = os.path.getsize(input_video) / (1024 * 1024)
           print(f"\n📦 Downloaded Video File: {os.path.basename(input_video)} ({orig_size_mb:.2f} MB)", flush=True)
 
+          # 🛡️ 1.9 Subtitle Sanitizer & CineStream / Apalod Community Brand Engine
+          AD_KEYWORDS = [
+              r'\byts(\.(mx|lt|ag|am|pm|ai|do|bz))?\b',
+              r'\byify\b',
+              r'\brarbg(\.(to|is))?\b',
+              r'\bsubscene(\.(com|co|is|icu))?\b',
+              r'\bopensubtitles(\.(org|com))?\b',
+              r'\b1337x(\.(to|is|st|gd))?\b',
+              r'\bpsa(rips)?\b',
+              r'\bgalaxyrg\b',
+              r'\bfmovies\b',
+              r'\bcinevood\b',
+              r'\bfilmyzilla\b',
+              r'\bbolly4u\b',
+              r'\btamilmv\b',
+              r'\btodaypk\b',
+              r'downloaded\s+from',
+              r'ripped\s+by',
+              r'encoded\s+by',
+              r'synced\s+by',
+              r'resynced\s+by',
+              r'advertise\s+(with|your)',
+              r'support\s+us',
+              r'vip\s+member',
+              r'watch\s+movies\s+online',
+              r'best\s+movie\s+source',
+              r'https?://[a-zA-Z0-9\.\-_/]+',
+              r'www\.[a-zA-Z0-9\.\-_/]+',
+              r'\b([a-zA-Z0-9\-_]+\.(com|org|net|mx|to|is|tv|cc|cx|xyz|in))\b'
+          ]
+          ad_pattern_re = re.compile('|'.join(AD_KEYWORDS), re.IGNORECASE)
+
+          def sanitize_and_brand_srt(file_path: str, is_sinhala: bool = False):
+              """
+              Removes all external piracy sites/ads (YTS, YIFY, OpenSubtitles, etc.)
+              and seamlessly brands intro/credits with 'Apalod community විසින් Cine Stream movis hub වෙත නිකුත් කරන ලදී'.
+              """
+              if not file_path or not os.path.exists(file_path):
+                  return
+              try:
+                  with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                      content = f.read()
+
+                  brand_text = (
+                      "Apalod community විසින් Cine Stream movis hub වෙත නිකුත් කරන ලදී"
+                      if is_sinhala
+                      else "Released by Apalod community for Cine Stream movies hub"
+                  )
+
+                  blocks = [b.strip() for b in content.replace("\r\n", "\n").split("\n\n") if b.strip()]
+                  cleaned_blocks = []
+                  replaced_count = 0
+
+                  for idx, b in enumerate(blocks):
+                      lines = b.split("\n")
+                      if len(lines) >= 3:
+                          idx_line = lines[0]
+                          time_line = lines[1]
+                          text_body = "\n".join(lines[2:])
+
+                          # Check if ad pattern is in subtitle line
+                          if ad_pattern_re.search(text_body):
+                              text_body = brand_text
+                              replaced_count += 1
+                          # Also check first 2 cues: if they mention encoder/syncer/site/credits
+                          elif idx < 2 and any(k in text_body.lower() for k in ["sync", "rip", "encode", "subtitle", "present", "org", "net", "com"]):
+                              text_body = brand_text
+                              replaced_count += 1
+
+                          cleaned_blocks.append(f"{idx_line}\n{time_line}\n{text_body}")
+                      else:
+                          cleaned_blocks.append(b)
+
+                  with open(file_path, "w", encoding="utf-8") as f:
+                      f.write("\n\n".join(cleaned_blocks) + "\n")
+
+                  if replaced_count > 0:
+                      lang_name = "Sinhala" if is_sinhala else "English"
+                      print(f"🛡️ [SUBTITLE BRANDING] Replaced {replaced_count} YTS/site credits with CineStream/Apalod branding in {lang_name} subtitles!", flush=True)
+              except Exception as cl_err:
+                  print(f"⚠️ Subtitle cleaning notice: {cl_err}", flush=True)
+
           # 🎯 2. Download Sinhala or English Subtitle if URL provided
           subtitle_file = None
           english_sub_file = None
@@ -221,14 +303,36 @@ jobs:
                           subtitle_file = f"{work_dir}/sinhala_sub.srt"
                           with open(subtitle_file, "wb") as sf:
                               sf.write(sub_res.content)
+                          sanitize_and_brand_srt(subtitle_file, is_sinhala=True)
                           print(f"✅ Sinhala Subtitle verified & saved: {subtitle_file}", flush=True)
                       else:
                           english_sub_file = f"{work_dir}/english_sub.srt"
                           with open(english_sub_file, "wb") as sf:
                               sf.write(sub_res.content)
+                          sanitize_and_brand_srt(english_sub_file, is_sinhala=False)
                           print(f"✅ English Subtitle downloaded, will translate to Sinhala: {english_sub_file}", flush=True)
               except Exception as se:
                   print(f"⚠️ Subtitle URL notice: {se}")
+
+          # 🎯 2.05 Auto-Sync External English Subtitles with Video Audio Speech (ffsubsync)
+          if english_sub_file and os.path.exists(english_sub_file) and input_video and os.path.exists(input_video):
+              print("\n⚡ [AUTO-SYNC ENGINE] Aligning external English subtitle with video speech timestamps...", flush=True)
+              synced_sub = f"{work_dir}/english_synced.srt"
+              try:
+                  sync_proc = subprocess.run([
+                      "ffsubsync", input_video,
+                      "-i", english_sub_file,
+                      "-o", synced_sub,
+                      "--max-offset-seconds", "60"
+                  ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+                  if sync_proc.returncode == 0 and os.path.exists(synced_sub) and os.path.getsize(synced_sub) > 100:
+                      english_sub_file = synced_sub
+                      sanitize_and_brand_srt(english_sub_file, is_sinhala=False)
+                      print("🎯 [AUTO-SYNC SUCCESS] Subtitle timings perfectly synchronized with dialogue audio!", flush=True)
+                  else:
+                      print("ℹ️ [AUTO-SYNC] Kept original timings (Audio alignment completed or not needed).", flush=True)
+              except Exception as sync_e:
+                  print(f"⚠️ Auto-sync notice: {sync_e} (continuing with original timing)", flush=True)
 
           # 🎯 2.1 Check for ALL Embedded Subtitle tracks in input video
           if not subtitle_file and not english_sub_file:
@@ -267,6 +371,7 @@ jobs:
                   best_sin = max(sin_tracks, key=lambda x: x["cues"])
                   subtitle_file = f"{work_dir}/sinhala_sub.srt"
                   os.replace(best_sin["path"], subtitle_file)
+                  sanitize_and_brand_srt(subtitle_file, is_sinhala=True)
                   print(f"✅ Found full embedded Sinhala subtitle track (#{best_sin['index']}, {best_sin['cues']} cues)!", flush=True)
 
               # Otherwise check for full English tracks (avoiding forced minimal 10-line tracks)
@@ -276,6 +381,7 @@ jobs:
                       best_eng = max(eng_tracks, key=lambda x: x["cues"])
                       english_sub_file = f"{work_dir}/english_sub.srt"
                       os.replace(best_eng["path"], english_sub_file)
+                      sanitize_and_brand_srt(english_sub_file, is_sinhala=False)
                       print(f"✅ Extracted full English subtitle track (#{best_eng['index']}, {best_eng['cues']} cues)!", flush=True)
                   else:
                       print("ℹ️ No full embedded subtitle track found. Proceeding to AI Speech-to-Text...", flush=True)
@@ -380,7 +486,8 @@ jobs:
                           "CRITICAL RULES:\n"
                           "1. Output MUST be valid SRT format with the EXACT same numbering and timestamps as given.\n"
                           "2. Do NOT do literal word-by-word Google-translate style translation. Use conversational spoken Sinhala (කතා බහ කරන චතුර, හැඟීම්බර සිනමා දෙබස්).\n"
-                          "3. Do not include markdown codeblocks, notes, or explanations. Output ONLY the valid SRT cues.\n\n"
+                          "3. Do not include markdown codeblocks, notes, or explanations. Output ONLY the valid SRT cues.\n"
+                          "4. BRANDING & WATERMARK REPLACEMENT (STRICT): If any cue mentions websites, pirate/release groups, or subtitle sites (such as YTS, YTS.mx, YIFY, RARBG, Subscene, OpenSubtitles, PSA, 1337x, or any external website/group), NEVER include their name or URL. ALWAYS replace that text with: 'Apalod community විසින් Cine Stream movis hub වෙත නිකුත් කරන ලදී'.\n\n"
                           "Subtitles to translate:\n"
                           f"{chunk_text}"
                       )
@@ -448,6 +555,7 @@ jobs:
 
                       if os.path.exists(cinematic_sub_path) and os.path.getsize(cinematic_sub_path) > 100:
                           subtitle_file = cinematic_sub_path
+                          sanitize_and_brand_srt(subtitle_file, is_sinhala=True)
                           print(f"🎬 [SUCCESS] Cinematic Sinhala Subtitles created successfully ({os.path.getsize(subtitle_file)/1024:.1f} KB)!", flush=True)
               except Exception as gem_e:
                   print(f"⚠️ Gemini translation warning: {gem_e}", flush=True)
@@ -663,11 +771,12 @@ jobs:
               # Subtitle file uploads to THUMBNAILS_CHANNEL
               sinhala_sub_msg_id = ""
               if subtitle_file and os.path.exists(subtitle_file):
+                  sanitize_and_brand_srt(subtitle_file, is_sinhala=True)
                   try:
                       s_msg = await client.send_file(
                           THUMBNAILS_CHANNEL,
                           subtitle_file,
-                          caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 සිංහල උපසිරැසි ගොනුව",
+                          caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 සිංහල උපසිරැසි ගොනුව | Apalod Community",
                           parse_mode='html'
                       )
                       sinhala_sub_msg_id = str(s_msg.id)
@@ -677,11 +786,12 @@ jobs:
 
               english_sub_msg_id = ""
               if english_sub_file and os.path.exists(english_sub_file):
+                  sanitize_and_brand_srt(english_sub_file, is_sinhala=False)
                   try:
                       e_msg = await client.send_file(
                           THUMBNAILS_CHANNEL,
                           english_sub_file,
-                          caption=f"🔤 <b>{TITLE}</b> English Subtitle (.srt)\n⚡ CineStream Auto-Subtitles",
+                          caption=f"🔤 <b>{TITLE}</b> English Subtitle (.srt)\n⚡ CineStream Auto-Subtitles | Apalod Community",
                           parse_mode='html'
                       )
                       english_sub_msg_id = str(e_msg.id)
@@ -934,3 +1044,65 @@ jobs:
                   print(f"⚠️ [Queue Manager] Notice: {q_err}", flush=True)
           EOF
           python uploader.py
+
+      - name: 🛑 Cleanup Firebase Queue on Cancellation
+        if: cancelled()
+        env:
+          QUEUE_ID: "${{ github.event.inputs.queue_id }}"
+          MOVIE_TITLE: "${{ github.event.inputs.title }}"
+          FIREBASE_RTDB_URL: "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app"
+        run: |
+          python3 -c '
+          import os, json, requests
+          rtdb = os.environ.get("FIREBASE_RTDB_URL", "").rstrip("/")
+          qid = os.environ.get("QUEUE_ID", "").strip()
+          title = os.environ.get("MOVIE_TITLE", "").strip()
+          print(f"🛑 [Workflow Cancelled] Handling cancellation for queue_id={qid}, title={title}...")
+          if rtdb:
+              try:
+                  if qid:
+                      requests.patch(f"{rtdb}/queue/{qid}.json", json={"status": "cancelled", "note": "Cancelled manually via GitHub Actions"}, timeout=10)
+                      print(f"✅ Marked queue item {qid} as cancelled in Firebase RTDB.")
+                  else:
+                      res = requests.get(f"{rtdb}/queue.json", timeout=10)
+                      if res.status_code == 200 and res.json():
+                          for k, v in res.json().items():
+                              if isinstance(v, dict):
+                                  if v.get("status") == "processing" and (v.get("title", "").strip().lower() == title.lower() or not title):
+                                      requests.patch(f"{rtdb}/queue/{k}.json", json={"status": "cancelled", "note": "Cancelled manually via GitHub Actions"}, timeout=10)
+                                      print(f"✅ Marked queue item {k} as cancelled.")
+                                      break
+              except Exception as e:
+                  print(f"⚠️ Failed to update cancellation in RTDB: {e}")
+          '
+
+      - name: ⚠️ Cleanup Firebase Queue on Failure
+        if: failure()
+        env:
+          QUEUE_ID: "${{ github.event.inputs.queue_id }}"
+          MOVIE_TITLE: "${{ github.event.inputs.title }}"
+          FIREBASE_RTDB_URL: "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app"
+        run: |
+          python3 -c '
+          import os, json, requests
+          rtdb = os.environ.get("FIREBASE_RTDB_URL", "").rstrip("/")
+          qid = os.environ.get("QUEUE_ID", "").strip()
+          title = os.environ.get("MOVIE_TITLE", "").strip()
+          print(f"⚠️ [Workflow Failed] Handling failure for queue_id={qid}, title={title}...")
+          if rtdb:
+              try:
+                  if qid:
+                      requests.patch(f"{rtdb}/queue/{qid}.json", json={"status": "failed", "note": "Workflow failed on GitHub Actions"}, timeout=10)
+                      print(f"✅ Marked queue item {qid} as failed in Firebase RTDB.")
+                  else:
+                      res = requests.get(f"{rtdb}/queue.json", timeout=10)
+                      if res.status_code == 200 and res.json():
+                          for k, v in res.json().items():
+                              if isinstance(v, dict):
+                                  if v.get("status") == "processing" and (v.get("title", "").strip().lower() == title.lower() or not title):
+                                      requests.patch(f"{rtdb}/queue/{k}.json", json={"status": "failed", "note": "Workflow failed on GitHub Actions"}, timeout=10)
+                                      print(f"✅ Marked queue item {k} as failed.")
+                                      break
+              except Exception as e:
+                  print(f"⚠️ Failed to update failure in RTDB: {e}")
+          '
