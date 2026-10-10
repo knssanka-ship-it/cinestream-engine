@@ -870,59 +870,166 @@ jobs:
               # 🎯 5. AUTOMATIC FIREBASE REALTIME DATABASE SYNC
               if RTDB_BASE:
                   print("🔄 [Firebase RTDB Auto-Sync] Updating database...", flush=True)
-                  target_id = MOVIE_ID
-
-                  # Target ID එක නැතිනම්, Title එකෙන් සොයාගැනීම
-                  if not target_id:
+                  cur_qid = os.environ.get("QUEUE_ID", "").strip()
+                  queue_item = None
+                  if cur_qid:
                       try:
-                          res = requests.get(f"{RTDB_BASE}/movies.json", timeout=15)
-                          if res.status_code == 200 and res.json():
-                              all_m = res.json()
-                              for mid, mdata in all_m.items():
-                                  if isinstance(mdata, dict) and mdata.get("title", "").strip().lower() == TITLE.strip().lower():
-                                      target_id = mid
-                                      print(f"🎯 Matched Movie in Database: {mid} ('{TITLE}')", flush=True)
-                                      break
-                      except Exception as fe:
-                          print(f"⚠️ Search in DB warning: {fe}", flush=True)
+                          q_snap = requests.get(f"{RTDB_BASE}/queue/{cur_qid}.json", timeout=15)
+                          if q_snap.status_code == 200 and q_snap.json():
+                              queue_item = q_snap.json()
+                      except Exception:
+                          pass
 
-                  if target_id:
-                      patch_payload = {
-                          "telegramMessageId": str(msg.id),
-                          "telegramPostUrl": tg_post_url,
-                          "directStreamUrl": direct_stream_url,
-                      }
-                      if msg_480p_id:
-                          patch_payload["telegramDownload480pId"] = str(msg_480p_id)
-                          patch_payload["downloadUrl480p"] = direct_download_480p_url
-                          patch_payload["downloadSize480p"] = size_480_str
-                      if sinhala_sub_msg_id:
-                          patch_payload["telegramSubtitleId"] = sinhala_sub_msg_id
-                          patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{sinhala_sub_msg_id}"
-                          patch_payload["hasSinhalaSub"] = True
+                  # 🎬 Check if this is a TV Series Episode
+                  is_tv_episode = False
+                  series_id = ""
+                  season_num = 1
+                  ep_num = 1
+                  ep_title = ""
 
-                      if english_sub_msg_id:
-                          patch_payload["telegramEnglishSubtitleId"] = english_sub_msg_id
-                          patch_payload["englishSubtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
-                          # If no Sinhala subtitle, set English subtitle as default
-                          if not sinhala_sub_msg_id:
-                              patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
-
-                      try:
-                          update_res = requests.patch(
-                              f"{RTDB_BASE}/movies/{target_id}.json",
-                              json=patch_payload,
-                              timeout=15
-                          )
-                          if update_res.status_code in [200, 204]:
-                              print(f"🔥 [SUCCESS] Firebase Realtime Database ({target_id}) සාර්ථකව Live Update විය!", flush=True)
-                          else:
-                              print(f"⚠️ Firebase update response: {update_res.status_code} - {update_res.text}", flush=True)
-                      except Exception as pe:
-                          print(f"❌ Failed to patch Firebase RTDB: {pe}", flush=True)
+                  if queue_item and (queue_item.get("type") == "tv_series_episode" or queue_item.get("seriesId")):
+                      is_tv_episode = True
+                      series_id = queue_item.get("seriesId", "")
+                      season_num = int(queue_item.get("season", 1))
+                      ep_num = int(queue_item.get("episode", 1))
+                      ep_title = queue_item.get("title", f"Episode {ep_num}")
                   else:
-                      print("ℹ️ Movie ID සොයාගත නොහැකි වූ බැවින් Database update වීම මගහැරිණි.", flush=True)
+                      match = re.search(r'S(\d+)E(\d+)', TITLE, re.IGNORECASE)
+                      if match:
+                          is_tv_episode = True
+                          season_num = int(match.group(1))
+                          ep_num = int(match.group(2))
+                          series_title = TITLE.split("-")[0].strip()
+                          try:
+                              tv_res = requests.get(f"{RTDB_BASE}/tv_series.json", timeout=15)
+                              if tv_res.status_code == 200 and tv_res.json():
+                                  for sid, sdata in tv_res.json().items():
+                                      if isinstance(sdata, dict) and sdata.get("title", "").strip().lower() == series_title.lower():
+                                          series_id = sid
+                                          break
+                          except Exception:
+                              pass
 
+                  if is_tv_episode and series_id:
+                      try:
+                          s_res = requests.get(f"{RTDB_BASE}/tv_series/{series_id}.json", timeout=15)
+                          if s_res.status_code == 200 and s_res.json():
+                              s_data = s_res.json()
+                              seasons = s_data.get("seasons", [])
+                              if not seasons or not isinstance(seasons, list):
+                                  seasons = [{"seasonNumber": season_num, "title": f"Season {season_num}", "episodes": []}]
+                              
+                              target_season = None
+                              for s in seasons:
+                                  if isinstance(s, dict) and s.get("seasonNumber") == season_num:
+                                      target_season = s
+                                      break
+                              if not target_season:
+                                  target_season = {"seasonNumber": season_num, "title": f"Season {season_num}", "episodes": []}
+                                  seasons.append(target_season)
+                              
+                              ep_list = target_season.get("episodes", [])
+                              if not isinstance(ep_list, list):
+                                  ep_list = []
+                              
+                              ep_payload = {
+                                  "id": f"ep_{ep_num}",
+                                  "episodeNumber": ep_num,
+                                  "title": ep_title or f"Episode {ep_num}",
+                                  "name": ep_title or f"Episode {ep_num}",
+                                  "streamUrl": direct_stream_url,
+                                  "directStreamUrl": direct_stream_url,
+                                  "telegramMessageId": str(msg.id),
+                                  "telegramPostUrl": tg_post_url,
+                                  "status": "ready"
+                              }
+                              if msg_480p_id:
+                                  ep_payload["downloadUrl"] = direct_download_480p_url
+                                  ep_payload["downloadUrl480p"] = direct_download_480p_url
+                                  ep_payload["telegramDownload480pId"] = str(msg_480p_id)
+                                  ep_payload["downloadSize480p"] = size_480_str
+                              if sinhala_sub_msg_id:
+                                  ep_payload["telegramSubtitleId"] = sinhala_sub_msg_id
+                                  ep_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{sinhala_sub_msg_id}"
+                                  ep_payload["hasSinhalaSub"] = True
+                              if english_sub_msg_id:
+                                  ep_payload["telegramEnglishSubtitleId"] = english_sub_msg_id
+                                  ep_payload["englishSubtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
+                                  if not sinhala_sub_msg_id:
+                                      ep_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
+                              
+                              existing_idx = -1
+                              for idx, ep_item in enumerate(ep_list):
+                                  if isinstance(ep_item, dict) and ep_item.get("episodeNumber") == ep_num:
+                                      existing_idx = idx
+                                      break
+                              if existing_idx >= 0:
+                                  ep_list[existing_idx] = ep_payload
+                              else:
+                                  ep_list.append(ep_payload)
+                              
+                              ep_list.sort(key=lambda x: x.get("episodeNumber", 0))
+                              target_season["episodes"] = ep_list
+                              
+                              save_res = requests.put(
+                                  f"{RTDB_BASE}/tv_series/{series_id}/seasons.json",
+                                  json=seasons,
+                                  timeout=15
+                              )
+                              if save_res.status_code in [200, 204]:
+                                  print(f"🔥 [SUCCESS] Firebase RTDB TV Series ('{s_data.get('title')}') Season {season_num} Episode {ep_num} සාර්ථකව Live Update විය!", flush=True)
+                              else:
+                                  print(f"⚠️ TV Series update response: {save_res.status_code} - {save_res.text}", flush=True)
+                      except Exception as te:
+                          print(f"❌ Failed to update TV series in Firebase RTDB: {te}", flush=True)
+                  else:
+                      # 📽️ Movie update flow
+                      target_id = MOVIE_ID
+                      if not target_id:
+                          try:
+                              res = requests.get(f"{RTDB_BASE}/movies.json", timeout=15)
+                              if res.status_code == 200 and res.json():
+                                  all_m = res.json()
+                                  for mid, mdata in all_m.items():
+                                      if isinstance(mdata, dict) and mdata.get("title", "").strip().lower() == TITLE.strip().lower():
+                                          target_id = mid
+                                          print(f"🎯 Matched Movie in Database: {mid} ('{TITLE}')", flush=True)
+                                          break
+                          except Exception as fe:
+                              print(f"⚠️ Search in DB warning: {fe}", flush=True)
+                      if target_id:
+                          patch_payload = {
+                              "telegramMessageId": str(msg.id),
+                              "telegramPostUrl": tg_post_url,
+                              "directStreamUrl": direct_stream_url,
+                          }
+                          if msg_480p_id:
+                              patch_payload["telegramDownload480pId"] = str(msg_480p_id)
+                              patch_payload["downloadUrl480p"] = direct_download_480p_url
+                              patch_payload["downloadSize480p"] = size_480_str
+                          if sinhala_sub_msg_id:
+                              patch_payload["telegramSubtitleId"] = sinhala_sub_msg_id
+                              patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{sinhala_sub_msg_id}"
+                              patch_payload["hasSinhalaSub"] = True
+                          if english_sub_msg_id:
+                              patch_payload["telegramEnglishSubtitleId"] = english_sub_msg_id
+                              patch_payload["englishSubtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
+                              if not sinhala_sub_msg_id:
+                                  patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
+                          try:
+                              update_res = requests.patch(
+                                  f"{RTDB_BASE}/movies/{target_id}.json",
+                                  json=patch_payload,
+                                  timeout=15
+                              )
+                              if update_res.status_code in [200, 204]:
+                                  print(f"🔥 [SUCCESS] Firebase Realtime Database ({target_id}) සාර්ථකව Live Update විය!", flush=True)
+                              else:
+                                  print(f"⚠️ Firebase update response: {update_res.status_code} - {update_res.text}", flush=True)
+                          except Exception as pe:
+                              print(f"❌ Failed to patch Firebase RTDB: {pe}", flush=True)
+                      else:
+                          print("ℹ️ Movie ID සොයාගත නොහැකි වූ බැවින් Database update වීම මගහැරිණි.", flush=True)
               await client.disconnect()
 
           asyncio.run(upload_to_telegram())
