@@ -62,8 +62,10 @@ jobs:
           BOT_TOKEN = os.environ["BOT_TOKEN"]
           MOVIES_CHANNEL = int(os.environ["MOVIES_CHANNEL"])
           THUMBNAILS_CHANNEL = int(os.environ["THUMBNAILS_CHANNEL"])
-          TITLE = os.environ["MOVIE_TITLE"]
-          URI = os.environ["DOWNLOAD_URL"].strip()
+          TITLE = re.sub(r'[​-‏﻿‪-‮]', '', os.environ["MOVIE_TITLE"]).strip()
+          URI = re.sub(r'[​-‏﻿‪-‮]', '', os.environ["DOWNLOAD_URL"]).strip()
+          if "magnet:?" in URI.lower():
+              URI = URI[URI.lower().find("magnet:?"):]
           MOVIE_ID = os.environ.get("MOVIE_ID", "").strip()
           POSTER = os.environ.get("POSTER_URL", "").strip()
           SUBTITLE_URL = os.environ.get("SUBTITLE_URL", "").strip()
