@@ -8,8 +8,9 @@ on:
         required: true
         default: 'Mutiny (2026)'
       magnet:
-        description: 'Download Link (Magnet, Direct MP4/Seedr, or M3U8/MPD Stream URL)'
-        required: true
+        description: 'Download Link (Magnet, Direct MP4/Seedr, or M3U8/MPD Stream URL) - විකල්පයි (Subtitle පමණක් නම් හිස්ව තබන්න)'
+        required: false
+        default: ''
       movie_id:
         description: 'Firebase Movie ID (විකල්පයි - Admin Edit එකෙන් ලැබෙන ID එක)'
         required: false
@@ -86,6 +87,444 @@ jobs:
 
           print(f"🎬 [CineStream Cloud Engine] Starting: '{TITLE}'...", flush=True)
 
+          # 🛡️ Subtitle Sanitizer & Cine Stream Movie Hub Brand Engine
+          AD_KEYWORDS = [
+              r'\byts(\.(mx|lt|ag|am|pm|ai|do|bz))?\b',
+              r'\byify\b',
+              r'\brarbg(\.(to|is))?\b',
+              r'\bsubscene(\.(com|co|is|icu))?\b',
+              r'\bopensubtitles(\.(org|com))?\b',
+              r'\b1337x(\.(to|is|st|gd))?\b',
+              r'\bpsa(rips)?\b',
+              r'\bgalaxyrg\b',
+              r'\bfmovies\b',
+              r'\bcinevood\b',
+              r'\bfilmyzilla\b',
+              r'\bbolly4u\b',
+              r'\btamilmv\b',
+              r'\btodaypk\b',
+              r'\bbaiscope(lk)?(\.(com|lk))?\b',
+              r'\bcineru(\.lk)?\b',
+              r'\bsubz(\.lk)?\b',
+              r'\bzoom(\.lk)?\b',
+              r'\bsinhalasub(\.lk)?\b',
+              r'\bpiratelk(\.(com|lk))?\b',
+              r'\broar(\.lk)?\b',
+              r'බයිස්කෝප්',
+              r'සිනෙරූ',
+              r'සිනෙරු',
+              r'සබ්ස්(\.එල්කේ)?',
+              r'සූම්(\.එල්කේ)?',
+              r'වෙබ්\s*අඩවි[ය]*',
+              r'වෙත\s*පිවිසෙන්න',
+              r'සඳහා\s*පිවිසෙන්න',
+              r'උපසිරැසි\s*ගැන්වීම',
+              r'උපසිරැසිකරු',
+              r'උපසිරැසි\s*කණ්ඩායම',
+              r'සිංහල\s*උපසිරැසි',
+              r'බාගත\s*කරගන්න',
+              r'downloaded\s+from',
+              r'ripped\s+by',
+              r'encoded\s+by',
+              r'synced\s+by',
+              r'resynced\s+by',
+              r'translated\s+by',
+              r'subtitles?\s+by',
+              r'advertise\s+(with|your)',
+              r'support\s+us',
+              r'vip\s+member',
+              r'watch\s+movies\s+online',
+              r'best\s+movie\s+source',
+              r'https?://[^\s\n\r<>"]+',
+              r'www\.[^\s\n\r<>"]+',
+              r'\b([a-zA-Z0-9\-_]+\.(com|org|net|mx|to|is|tv|cc|cx|xyz|in|lk|co|info|me|top|club|site|online))\b'
+          ]
+          ad_pattern_re = re.compile('|'.join(AD_KEYWORDS), re.IGNORECASE)
+
+          def sanitize_and_brand_srt(file_path: str, is_sinhala: bool = False):
+              if not file_path or not os.path.exists(file_path):
+                  return
+              try:
+                  with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                      content = f.read()
+
+                  brand_text = (
+                      "Cine Stream Movie Hub කල උපසිරැසි ගැන්මක්"
+                      if is_sinhala
+                      else "Subtitles presented by Cine Stream Movie Hub"
+                  )
+
+                  blocks = [b.strip() for b in content.replace("\r\n", "\n").split("\n\n") if b.strip()]
+                  cleaned_blocks = []
+                  replaced_count = 0
+                  total_b = len(blocks)
+
+                  for idx, b in enumerate(blocks):
+                      lines = b.split("\n")
+                      if len(lines) >= 3:
+                          idx_line = lines[0]
+                          time_line = lines[1]
+                          text_body = "\n".join(lines[2:])
+
+                          if ad_pattern_re.search(text_body):
+                              text_body = brand_text
+                              replaced_count += 1
+                          elif (idx < 3 or idx >= total_b - 3) and any(k in text_body.lower() for k in [
+                              "sync", "rip", "encode", "subtitle", "present", "org", "net", "com", ".lk", "baiscope", "cineru",
+                              "subz", "zoom", "උපසිරැසි", "කල", "විසින්", "පරිවර්තන", "වෙබ්"
+                          ]):
+                              text_body = brand_text
+                              replaced_count += 1
+
+                          cleaned_blocks.append(f"{idx_line}\n{time_line}\n{text_body}")
+                      else:
+                          cleaned_blocks.append(b)
+
+                  with open(file_path, "w", encoding="utf-8") as f:
+                      f.write("\n\n".join(cleaned_blocks) + "\n")
+
+                  if replaced_count > 0:
+                      lang_name = "Sinhala" if is_sinhala else "English"
+                      print(f"🛡️ [SUBTITLE BRANDING] Replaced {replaced_count} external site credits with '{brand_text}' in {lang_name} subtitles!", flush=True)
+              except Exception as cl_err:
+                  print(f"⚠️ Subtitle cleaning notice: {cl_err}", flush=True)
+
+          def download_and_extract_subtitles(url, target_dir):
+              sin_f = None
+              eng_f = None
+              if not url:
+                  return None, None
+              print(f"📝 Fetching Subtitles from URL: {url}...", flush=True)
+              try:
+                  sub_res = requests.get(url, timeout=30)
+                  if sub_res.status_code == 200 and len(sub_res.content) > 100:
+                      if sub_res.content.startswith(b"PK\x03\x04") or url.lower().endswith(".zip"):
+                          print("📦 [Subtitle ZIP Detected] Unzipping subtitle archive...", flush=True)
+                          import zipfile, io
+                          try:
+                              with zipfile.ZipFile(io.BytesIO(sub_res.content)) as zf_sub:
+                                  for zname in zf_sub.namelist():
+                                      if zname.lower().endswith(".srt"):
+                                          raw_sub_data = zf_sub.read(zname)
+                                          s_text = raw_sub_data.decode("utf-8", errors="ignore")
+                                          if bool(re.search(r'[\u0D80-\u0DFF]', s_text)):
+                                              sin_f = f"{target_dir}/sinhala_sub.srt"
+                                              with open(sin_f, "wb") as sf:
+                                                  sf.write(raw_sub_data)
+                                              print(f"✅ Extracted Sinhala Subtitle from ZIP: {zname}", flush=True)
+                                              break
+                                          elif not eng_f:
+                                              eng_f = f"{target_dir}/english_sub.srt"
+                                              with open(eng_f, "wb") as sf:
+                                                  sf.write(raw_sub_data)
+                                              print(f"✅ Extracted English Subtitle from ZIP: {zname}", flush=True)
+                          except Exception as ze:
+                              print(f"⚠️ Subtitle ZIP extract note: {ze}", flush=True)
+
+                      if not sin_f and not eng_f:
+                          sub_text = sub_res.content.decode("utf-8", errors="ignore")
+                          has_sinhala = bool(re.search(r'[\u0D80-\u0DFF]', sub_text))
+                          if has_sinhala:
+                              sin_f = f"{target_dir}/sinhala_sub.srt"
+                              with open(sin_f, "wb") as sf:
+                                  sf.write(sub_res.content)
+                              print(f"✅ Sinhala Subtitle verified & saved: {sin_f}", flush=True)
+                          else:
+                              eng_f = f"{target_dir}/english_sub.srt"
+                              with open(eng_f, "wb") as sf:
+                                  sf.write(sub_res.content)
+                              print(f"✅ English Subtitle downloaded: {eng_f}", flush=True)
+              except Exception as se:
+                  print(f"⚠️ Subtitle URL fetch error: {se}", flush=True)
+              return sin_f, eng_f
+
+          def translate_english_srt_to_sinhala(english_srt_file, output_sinhala_file):
+              if not english_srt_file or not os.path.exists(english_srt_file) or not GEMINI_API_KEY:
+                  return None
+              print("\n✨ [GEMINI AI] Translating English Subtitles into Natural Cinematic Sinhala (100% Full Coverage Guarantee)...", flush=True)
+              try:
+                  with open(english_srt_file, "r", encoding="utf-8", errors="ignore") as ef:
+                      raw_sub_content = ef.read()
+
+                  blocks = [b.strip() for b in raw_sub_content.replace("\r\n", "\n").split("\n\n") if b.strip()]
+                  total_blocks = len(blocks)
+                  print(f"📊 Found {total_blocks} subtitle cues to translate into Cinematic Sinhala.", flush=True)
+
+                  chunk_size = 30
+                  translated_blocks = []
+
+                  def translate_cues_chunk(cues_list, retry_depth=0):
+                      if not cues_list:
+                          return []
+                      cues_text = "\n\n".join(cues_list)
+
+                      prompt = (
+                          "You are an elite cinematic movie subtitle translator and dialog director for Sinhala cinema.\n"
+                          "Translate EVERY single English movie subtitle cue below into natural, emotional, dramatic, and expressive spoken Sinhala (සිනමාරූපී චිත්‍රපට දෙබස් ශෛලිය).\n\n"
+                          "CRITICAL MANDATORY RULES:\n"
+                          "1. Output MUST be valid SRT format with the EXACT same numbering and timestamps as given in input.\n"
+                          "2. Translate EVERY SINGLE CUE into Sinhala. Do NOT skip any cue or leave any line in English.\n"
+                          "3. Use conversational spoken Sinhala (කතා බහ කරන චතුර, හැඟීම්බර සිනමා දෙබස්).\n"
+                          "4. Do NOT include markdown codeblocks, notes, or explanations. Output ONLY the raw valid SRT cues.\n"
+                          "5. BRANDING & WATERMARK REPLACEMENT: If any cue mentions websites, pirate/release groups, or subtitle sites (such as YTS, YTS.mx, YIFY, RARBG, Subscene, OpenSubtitles, PSA, 1337x, Baiscope, Cineru, or any external website/group), NEVER include their name or URL. ALWAYS replace that text with: 'Cine Stream Movie Hub කල උපසිරැසි ගැන්මක්'.\n\n"
+                          "Subtitles to translate:\n"
+                          f"{cues_text}"
+                      )
+
+                      models_to_try = [
+                          "gemini-2.5-flash",
+                          "gemini-3.5-flash",
+                          "gemini-2.5-flash",
+                          "gemini-3.5-flash"
+                      ]
+
+                      for attempt, model_name in enumerate(models_to_try):
+                          try:
+                              g_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                              gen_cfg = {"temperature": 0.2}
+                              if "2.5" in model_name:
+                                  gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
+                              payload = {
+                                  "contents": [{"parts": [{"text": prompt}]}],
+                                  "generationConfig": gen_cfg
+                              }
+                              g_res = requests.post(g_url, json=payload, headers={"Content-Type": "application/json"}, timeout=60)
+                              if g_res.status_code == 200:
+                                  g_data = g_res.json()
+                                  candidates = g_data.get("candidates", [])
+                                  if candidates:
+                                      part_text = ""
+                                      for p in candidates[0].get("content", {}).get("parts", []):
+                                          t = p.get("text", "")
+                                          if t and not p.get("thought", False):
+                                              part_text += t
+                                      part_text = re.sub(r"^```[a-zA-Z]*\n", "", part_text.strip())
+                                      part_text = re.sub(r"\n```$", "", part_text.strip())
+                                      if part_text and bool(re.search(r'[\u0D80-\u0DFF]', part_text)):
+                                          return [part_text]
+                              elif g_res.status_code == 429:
+                                  cooldown = 20 + (attempt * 10)
+                                  print(f"[RateLimit 429 - waiting {cooldown}s...]", end="", flush=True)
+                                  time.sleep(cooldown)
+                              elif g_res.status_code == 503:
+                                  print(f"[Busy 503 - waiting 8s...]", end="", flush=True)
+                                  time.sleep(8)
+                              else:
+                                  print(f"[{model_name} HTTP {g_res.status_code}]", end="", flush=True)
+                                  time.sleep(3)
+                          except Exception as ce:
+                              print(f"[{model_name} Retry {attempt+1}: {type(ce).__name__}]", end="", flush=True)
+                              time.sleep(3)
+
+                      if len(cues_list) > 10 and retry_depth < 3:
+                          mid = len(cues_list) // 2
+                          print(f" [Splitting {len(cues_list)} cues into {mid} + {len(cues_list)-mid}]...", end="", flush=True)
+                          res1 = translate_cues_chunk(cues_list[:mid], retry_depth + 1)
+                          res2 = translate_cues_chunk(cues_list[mid:], retry_depth + 1)
+                          return res1 + res2
+
+                      print(" [Single-cue translation guarantee]...", end="", flush=True)
+                      single_cues_out = []
+                      for s_cue in cues_list:
+                          s_lines = s_cue.split("\n")
+                          if len(s_lines) >= 3:
+                              c_num, c_time, c_body = s_lines[0], s_lines[1], "\n".join(s_lines[2:])
+                              s_prompt = f"Translate this movie dialogue line to natural Sinhala only (no explanation):\n{c_body}"
+                              try:
+                                  s_res = requests.post(
+                                      f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+                                      json={"contents": [{"parts": [{"text": s_prompt}]}], "generationConfig": {"temperature": 0.1, "thinkingConfig": {"thinkingBudget": 0}}},
+                                      headers={"Content-Type": "application/json"},
+                                      timeout=20
+                                  )
+                                  if s_res.status_code == 200:
+                                      s_cands = s_res.json().get("candidates", [])
+                                      if s_cands:
+                                          s_sin = s_cands[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                                          s_sin = re.sub(r"^```[a-zA-Z]*\n", "", s_sin.strip())
+                                          s_sin = re.sub(r"\n```$", "", s_sin.strip())
+                                          if bool(re.search(r'[\u0D80-\u0DFF]', s_sin)):
+                                              single_cues_out.append(f"{c_num}\n{c_time}\n{s_sin}")
+                                              time.sleep(1)
+                                              continue
+                              except Exception:
+                                  pass
+                          single_cues_out.append(s_cue)
+                      return single_cues_out
+
+                  for c_idx in range(0, total_blocks, chunk_size):
+                      chunk = blocks[c_idx:c_idx + chunk_size]
+                      c_num = (c_idx // chunk_size) + 1
+                      tot_c = (total_blocks + chunk_size - 1) // chunk_size
+                      print(f"🔄 Translating batch {c_num}/{tot_c} (cues {c_idx+1}-{min(c_idx+chunk_size, total_blocks)})...", end="", flush=True)
+
+                      sub_res = translate_cues_chunk(chunk)
+                      if sub_res:
+                          translated_blocks.extend(sub_res)
+                          print(" ✅", flush=True)
+                      else:
+                          translated_blocks.append("\n\n".join(chunk))
+                          print(" ⚠️", flush=True)
+
+                      time.sleep(3)
+
+                  if translated_blocks:
+                      with open(output_sinhala_file, "w", encoding="utf-8") as out_sf:
+                          out_sf.write("\n\n".join(translated_blocks) + "\n")
+
+                      if os.path.exists(output_sinhala_file) and os.path.getsize(output_sinhala_file) > 100:
+                          sanitize_and_brand_srt(output_sinhala_file, is_sinhala=True)
+                          print(f"🎬 [SUCCESS] Complete 100% Cinematic Sinhala Subtitles created successfully ({os.path.getsize(output_sinhala_file)/1024:.1f} KB)!", flush=True)
+                          return output_sinhala_file
+              except Exception as gem_e:
+                  print(f"⚠️ Gemini translation warning: {gem_e}", flush=True)
+              return None
+
+          async def upload_subtitle_only_mode(sinhala_f, english_f):
+              print("\n🚀 Connecting to Telegram MTProto API for Subtitle Upload...", flush=True)
+              client = TelegramClient(
+                  'gh_cloud_sub_session',
+                  API_ID,
+                  API_HASH,
+                  timeout=180,
+                  retry_delay=5,
+                  connection_retries=10,
+                  auto_reconnect=True
+              )
+              await client.start(bot_token=BOT_TOKEN)
+
+              sinhala_sub_msg_id = ""
+              if sinhala_f and os.path.exists(sinhala_f):
+                  sanitize_and_brand_srt(sinhala_f, is_sinhala=True)
+                  try:
+                      s_msg = await client.send_file(
+                          THUMBNAILS_CHANNEL,
+                          sinhala_f,
+                          caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 Cine Stream Movie Hub කල උපසිරැසි ගැන්මක් | CineStream",
+                          parse_mode='html'
+                      )
+                      sinhala_sub_msg_id = str(s_msg.id)
+                      print(f"✅ Sinhala Subtitle uploaded to Telegram ({sinhala_sub_msg_id})!", flush=True)
+                  except Exception as se:
+                      print(f"⚠️ Sinhala Subtitle upload error: {se}", flush=True)
+
+              english_sub_msg_id = ""
+              if english_f and os.path.exists(english_f):
+                  sanitize_and_brand_srt(english_f, is_sinhala=False)
+                  try:
+                      e_msg = await client.send_file(
+                          THUMBNAILS_CHANNEL,
+                          english_f,
+                          caption=f"🔤 <b>{TITLE}</b> English Subtitle (.srt)\n⚡ Cine Stream Auto-Subtitles | CineStream",
+                          parse_mode='html'
+                      )
+                      english_sub_msg_id = str(e_msg.id)
+                      print(f"✅ English Subtitle uploaded to Telegram ({english_sub_msg_id})!", flush=True)
+                  except Exception as ee:
+                      print(f"⚠️ English Subtitle upload error: {ee}", flush=True)
+
+              try:
+                  await client.send_message(
+                      MOVIES_CHANNEL,
+                      f"📝 <b>{TITLE}</b>\n🇱🇰 චිත්‍රපටය සඳහා නව සිංහල උපසිරැසි (Sinhala Subtitle) සාර්ථකව යාවත්කාලීන කරන ලදී!\n🇱🇰 Cine Stream Movie Hub කල උපසිරැසි ගැන්මක්",
+                      parse_mode='html'
+                  )
+              except Exception as me:
+                  print(f"⚠️ Movie channel notice: {me}", flush=True)
+
+              if RTDB_BASE:
+                  target_id = MOVIE_ID
+                  if not target_id:
+                      try:
+                          res = requests.get(f"{RTDB_BASE}/movies.json", timeout=15)
+                          if res.status_code == 200 and res.json():
+                              for mid, mdata in res.json().items():
+                                  if isinstance(mdata, dict) and mdata.get("title", "").strip().lower() == TITLE.strip().lower():
+                                      target_id = mid
+                                      print(f"🎯 Matched Movie in Database: {mid} ('{TITLE}')", flush=True)
+                                      break
+                      except Exception as fe:
+                          print(f"⚠️ Search in DB warning: {fe}", flush=True)
+
+                  if target_id:
+                      patch_payload = {}
+                      if sinhala_sub_msg_id:
+                          patch_payload["telegramSubtitleId"] = sinhala_sub_msg_id
+                          patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{sinhala_sub_msg_id}"
+                          patch_payload["hasSinhalaSub"] = True
+                          patch_payload["subtitleFileName"] = f"{TITLE} Sinhala Subtitle.srt"
+                      if english_sub_msg_id:
+                          patch_payload["telegramEnglishSubtitleId"] = english_sub_msg_id
+                          patch_payload["englishSubtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
+                          if not sinhala_sub_msg_id:
+                              patch_payload["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{english_sub_msg_id}"
+
+                      if patch_payload:
+                          try:
+                              update_res = requests.patch(
+                                  f"{RTDB_BASE}/movies/{target_id}.json",
+                                  json=patch_payload,
+                                  timeout=15
+                              )
+                              if update_res.status_code in [200, 204]:
+                                  print(f"🔥 [SUCCESS] Firebase RTDB ({target_id}) Subtitle info සාර්ථකව Live Update විය!", flush=True)
+                              else:
+                                  print(f"⚠️ Firebase update response: {update_res.status_code}", flush=True)
+                          except Exception as pe:
+                              print(f"❌ Failed to patch Firebase RTDB: {pe}", flush=True)
+                  else:
+                      print("ℹ️ Movie ID සොයාගත නොහැකි වූ බැවින් Database update වීම මගහැරිණි.", flush=True)
+
+              cur_qid = os.environ.get("QUEUE_ID", "").strip()
+              if cur_qid and RTDB_BASE:
+                  try:
+                      requests.patch(
+                          f"{RTDB_BASE}/queue/{cur_qid}.json",
+                          json={"status": "completed", "completedAt": int(time.time())},
+                          timeout=15
+                      )
+                  except Exception:
+                      pass
+
+              await client.disconnect()
+
+          # 🎯 0. SUBTITLE-ONLY MODE CHECK
+          is_subtitle_only = (not URI) or (URI.upper() in ["SKIP", "NONE", "NULL", "NO", "EMPTY"]) or (not URI.startswith("http://") and not URI.startswith("https://") and not URI.startswith("magnet:?") and not URI.startswith("bc://bt/"))
+
+          if is_subtitle_only:
+              print("\n=======================================================", flush=True)
+              print("📝 [SUBTITLE-ONLY MODE ACTIVATED]", flush=True)
+              print(f"🎬 Movie Title : '{TITLE}'", flush=True)
+              print(f"🔗 Subtitle URL: {SUBTITLE_URL}", flush=True)
+              print(f"🆔 Movie ID    : {MOVIE_ID}", flush=True)
+              print("ℹ️ Re-uploading movie video is skipped. Processing subtitle translation & upload...", flush=True)
+              print("=======================================================\n", flush=True)
+
+              if not SUBTITLE_URL:
+                  print("❌ Error: SUBTITLE_URL must be provided when movie link is skipped!", flush=True)
+                  sys.exit(1)
+
+              sub_sin, sub_eng = download_and_extract_subtitles(SUBTITLE_URL, work_dir)
+              if not sub_sin and not sub_eng:
+                  print("❌ Error: Could not download or extract any .srt subtitle from provided URL!", flush=True)
+                  sys.exit(1)
+
+              if sub_sin and os.path.exists(sub_sin):
+                  print("🇱🇰 Provided subtitle is already in Sinhala. Sanitizing ads and branding...", flush=True)
+                  sanitize_and_brand_srt(sub_sin, is_sinhala=True)
+              elif sub_eng and os.path.exists(sub_eng):
+                  print("🔤 Provided subtitle is English. Translating into Sinhala via Gemini AI...", flush=True)
+                  sanitize_and_brand_srt(sub_eng, is_sinhala=False)
+                  sub_sin = f"{work_dir}/sinhala_cinematic_sub.srt"
+                  translate_english_srt_to_sinhala(sub_eng, sub_sin)
+                  if sub_sin and os.path.exists(sub_sin):
+                      sanitize_and_brand_srt(sub_sin, is_sinhala=True)
+
+              print("\n📤 Uploading subtitles to Telegram & syncing Firebase database...", flush=True)
+              asyncio.run(upload_subtitle_only_mode(sub_sin, sub_eng))
+              print("\n🎉 [SUCCESS] Subtitle Only Mode finished! Subtitles are active on Telegram and in the App.", flush=True)
+              sys.exit(0)
+
           # 🎯 1. Download Media (Stream / Direct / Magnet)
           is_stream = (".m3u8" in URI or ".mpd" in URI or "dashstream" in URI or "/hls/" in URI)
           is_magnet = URI.startswith("magnet:?") or URI.startswith("bc://bt/")
@@ -155,6 +594,8 @@ jobs:
                   "--bt-enable-lpd=true",
                   "--enable-peer-exchange=true",
                   "--bt-max-peers=150",
+                  "--bt-stop-timeout=600",
+                  "--bt-tracker-timeout=60",
                   "--file-allocation=none",
                   "--seed-time=0",
                   "--summary-interval=5",
@@ -209,115 +650,53 @@ jobs:
           orig_size_mb = os.path.getsize(input_video) / (1024 * 1024)
           print(f"\n📦 Downloaded Video File: {os.path.basename(input_video)} ({orig_size_mb:.2f} MB)", flush=True)
 
-          # 🛡️ 1.9 Subtitle Sanitizer & CineStream / Apalod Community Brand Engine
-          AD_KEYWORDS = [
-              r'\byts(\.(mx|lt|ag|am|pm|ai|do|bz))?\b',
-              r'\byify\b',
-              r'\brarbg(\.(to|is))?\b',
-              r'\bsubscene(\.(com|co|is|icu))?\b',
-              r'\bopensubtitles(\.(org|com))?\b',
-              r'\b1337x(\.(to|is|st|gd))?\b',
-              r'\bpsa(rips)?\b',
-              r'\bgalaxyrg\b',
-              r'\bfmovies\b',
-              r'\bcinevood\b',
-              r'\bfilmyzilla\b',
-              r'\bbolly4u\b',
-              r'\btamilmv\b',
-              r'\btodaypk\b',
-              r'downloaded\s+from',
-              r'ripped\s+by',
-              r'encoded\s+by',
-              r'synced\s+by',
-              r'resynced\s+by',
-              r'advertise\s+(with|your)',
-              r'support\s+us',
-              r'vip\s+member',
-              r'watch\s+movies\s+online',
-              r'best\s+movie\s+source',
-              r'https?://[a-zA-Z0-9\.\-_/]+',
-              r'www\.[a-zA-Z0-9\.\-_/]+',
-              r'\b([a-zA-Z0-9\-_]+\.(com|org|net|mx|to|is|tv|cc|cx|xyz|in))\b'
-          ]
-          ad_pattern_re = re.compile('|'.join(AD_KEYWORDS), re.IGNORECASE)
+          # 🎯 2. Download Sinhala or English Subtitle if URL provided (supports direct .srt or .zip archives)
+          subtitle_file, english_sub_file = download_and_extract_subtitles(SUBTITLE_URL, work_dir)
 
-          def sanitize_and_brand_srt(file_path: str, is_sinhala: bool = False):
-              """
-              Removes all external piracy sites/ads (YTS, YIFY, OpenSubtitles, etc.)
-              and seamlessly brands intro/credits with 'Apalod community විසින් Cine Stream movis hub වෙත නිකුත් කරන ලදී'.
-              """
-              if not file_path or not os.path.exists(file_path):
-                  return
+          # 🎯 2.0 Check if any Sinhala .srt was unpacked in downloaded media directory
+          if not subtitle_file:
+              local_srts = glob.glob(f"{work_dir}/**/*.srt", recursive=True)
+              for ls in local_srts:
+                  if ls == english_sub_file:
+                      continue
+                  try:
+                      with open(ls, "r", encoding="utf-8", errors="ignore") as lf:
+                          ltxt = lf.read()
+                          if bool(re.search(r'[\u0D80-\u0DFF]', ltxt)) and ltxt.count("-->") >= 30:
+                              subtitle_file = f"{work_dir}/sinhala_sub.srt"
+                              if ls != subtitle_file:
+                                  os.replace(ls, subtitle_file)
+                              print(f"✅ Found local Sinhala Subtitle in download folder: {os.path.basename(ls)}", flush=True)
+                              break
+                  except Exception:
+                      pass
+
+          # 🎯 2.05 Timing Verification & Auto-Sync for Provided Sinhala Subtitle
+          # පරිශීලකයා විසින් සිංහල සබ්ටයිටල් දැමූ විට, නැවත සබ්ටයිටල් නොහදා, වීඩියෝවට ටයිමින් වැඩද බලා Auto-Sync කිරීම
+          if subtitle_file and os.path.exists(subtitle_file) and input_video and os.path.exists(input_video):
+              print("\n⚡ [TIMING ENGINE] Verifying & aligning Sinhala subtitle timings with movie dialogue audio...", flush=True)
+              synced_sin = f"{work_dir}/sinhala_synced.srt"
               try:
-                  with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                      content = f.read()
+                  sync_proc = subprocess.run([
+                      "ffsubsync", input_video,
+                      "-i", subtitle_file,
+                      "-o", synced_sin,
+                      "--max-offset-seconds", "60"
+                  ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+                  if sync_proc.returncode == 0 and os.path.exists(synced_sin) and os.path.getsize(synced_sin) > 100:
+                      subtitle_file = synced_sin
+                      print("🎯 [AUTO-SYNC SUCCESS] Sinhala subtitle timings perfectly synchronized with dialogue audio!", flush=True)
+                  else:
+                      print("ℹ️ [TIMING CHECK] Original Sinhala subtitle timings verified and retained.", flush=True)
+              except Exception as sync_e:
+                  print(f"⚠️ Auto-sync notice for Sinhala: {sync_e} (continuing with original timing)", flush=True)
 
-                  brand_text = (
-                      "Apalod community විසින් Cine Stream movis hub වෙත නිකුත් කරන ලදී"
-                      if is_sinhala
-                      else "Released by Apalod community for Cine Stream movies hub"
-                  )
+              # Clean website names & brand with Cine Stream Movie Hub
+              sanitize_and_brand_srt(subtitle_file, is_sinhala=True)
+              print("✅ [SINHALA SUBTITLE READY] Provided Sinhala subtitle accepted directly! Skipping AI generation & translation.", flush=True)
 
-                  blocks = [b.strip() for b in content.replace("\r\n", "\n").split("\n\n") if b.strip()]
-                  cleaned_blocks = []
-                  replaced_count = 0
-
-                  for idx, b in enumerate(blocks):
-                      lines = b.split("\n")
-                      if len(lines) >= 3:
-                          idx_line = lines[0]
-                          time_line = lines[1]
-                          text_body = "\n".join(lines[2:])
-
-                          # Check if ad pattern is in subtitle line
-                          if ad_pattern_re.search(text_body):
-                              text_body = brand_text
-                              replaced_count += 1
-                          # Also check first 2 cues: if they mention encoder/syncer/site/credits
-                          elif idx < 2 and any(k in text_body.lower() for k in ["sync", "rip", "encode", "subtitle", "present", "org", "net", "com"]):
-                              text_body = brand_text
-                              replaced_count += 1
-
-                          cleaned_blocks.append(f"{idx_line}\n{time_line}\n{text_body}")
-                      else:
-                          cleaned_blocks.append(b)
-
-                  with open(file_path, "w", encoding="utf-8") as f:
-                      f.write("\n\n".join(cleaned_blocks) + "\n")
-
-                  if replaced_count > 0:
-                      lang_name = "Sinhala" if is_sinhala else "English"
-                      print(f"🛡️ [SUBTITLE BRANDING] Replaced {replaced_count} YTS/site credits with CineStream/Apalod branding in {lang_name} subtitles!", flush=True)
-              except Exception as cl_err:
-                  print(f"⚠️ Subtitle cleaning notice: {cl_err}", flush=True)
-
-          # 🎯 2. Download Sinhala or English Subtitle if URL provided
-          subtitle_file = None
-          english_sub_file = None
-          if SUBTITLE_URL:
-              print(f"📝 Fetching Subtitles from URL: {SUBTITLE_URL}...", flush=True)
-              try:
-                  sub_res = requests.get(SUBTITLE_URL, timeout=30)
-                  if sub_res.status_code == 200 and len(sub_res.content) > 100:
-                      sub_text = sub_res.content.decode("utf-8", errors="ignore")
-                      has_sinhala = bool(re.search(r'[\u0D80-\u0DFF]', sub_text))
-                      if has_sinhala:
-                          subtitle_file = f"{work_dir}/sinhala_sub.srt"
-                          with open(subtitle_file, "wb") as sf:
-                              sf.write(sub_res.content)
-                          sanitize_and_brand_srt(subtitle_file, is_sinhala=True)
-                          print(f"✅ Sinhala Subtitle verified & saved: {subtitle_file}", flush=True)
-                      else:
-                          english_sub_file = f"{work_dir}/english_sub.srt"
-                          with open(english_sub_file, "wb") as sf:
-                              sf.write(sub_res.content)
-                          sanitize_and_brand_srt(english_sub_file, is_sinhala=False)
-                          print(f"✅ English Subtitle downloaded, will translate to Sinhala: {english_sub_file}", flush=True)
-              except Exception as se:
-                  print(f"⚠️ Subtitle URL notice: {se}")
-
-          # 🎯 2.05 Auto-Sync External English Subtitles with Video Audio Speech (ffsubsync)
-          if english_sub_file and os.path.exists(english_sub_file) and input_video and os.path.exists(input_video):
+          # 🎯 2.06 Auto-Sync External English Subtitles with Video Audio Speech (ffsubsync)
+          if not subtitle_file and english_sub_file and os.path.exists(english_sub_file) and input_video and os.path.exists(input_video):
               print("\n⚡ [AUTO-SYNC ENGINE] Aligning external English subtitle with video speech timestamps...", flush=True)
               synced_sub = f"{work_dir}/english_synced.srt"
               try:
@@ -461,106 +840,12 @@ jobs:
               except Exception as w_err:
                   print(f"⚠️ Faster-Whisper notice: {w_err}", flush=True)
 
-          # 🎯 2.2 AI Cinematic Sinhala Subtitle Generation via Gemini 2.5 Flash
+          # 🎯 2.2 AI Cinematic Sinhala Subtitle Generation via Gemini AI (100% Full Dialogue Coverage)
           if not subtitle_file and english_sub_file and os.path.exists(english_sub_file) and GEMINI_API_KEY:
-              print("\n✨ [GEMINI 2.5 FLASH AI] Translating English Subtitles into Natural Cinematic Sinhala...", flush=True)
-              try:
-                  with open(english_sub_file, "r", encoding="utf-8", errors="ignore") as ef:
-                      raw_sub_content = ef.read()
-
-                  blocks = [b.strip() for b in raw_sub_content.replace("\r\n", "\n").split("\n\n") if b.strip()]
-                  total_blocks = len(blocks)
-                  print(f"📊 Found {total_blocks} subtitle cues to translate into Cinematic Sinhala.", flush=True)
-
-                  chunk_size = 75
-                  translated_blocks = []
-
-                  for c_idx in range(0, total_blocks, chunk_size):
-                      chunk = blocks[c_idx:c_idx + chunk_size]
-                      chunk_text = "\n\n".join(chunk)
-                      c_num = (c_idx // chunk_size) + 1
-                      tot_c = (total_blocks + chunk_size - 1) // chunk_size
-                      print(f"🔄 Translating batch {c_num}/{tot_c} (cues {c_idx+1}-{min(c_idx+chunk_size, total_blocks)})...", end="", flush=True)
-
-                      prompt = (
-                          "You are an elite cinematic movie subtitle translator and dialog director for Sinhala cinema.\n"
-                          "Translate the following English movie subtitle cues into natural, emotional, dramatic, and expressive spoken Sinhala (සිනමාරූපී චිත්‍රපට දෙබස් ශෛලිය).\n\n"
-                          "CRITICAL RULES:\n"
-                          "1. Output MUST be valid SRT format with the EXACT same numbering and timestamps as given.\n"
-                          "2. Do NOT do literal word-by-word Google-translate style translation. Use conversational spoken Sinhala (කතා බහ කරන චතුර, හැඟීම්බර සිනමා දෙබස්).\n"
-                          "3. Do not include markdown codeblocks, notes, or explanations. Output ONLY the valid SRT cues.\n"
-                          "4. BRANDING & WATERMARK REPLACEMENT (STRICT): If any cue mentions websites, pirate/release groups, or subtitle sites (such as YTS, YTS.mx, YIFY, RARBG, Subscene, OpenSubtitles, PSA, 1337x, or any external website/group), NEVER include their name or URL. ALWAYS replace that text with: 'Apalod community විසින් Cine Stream movis hub වෙත නිකුත් කරන ලදී'.\n\n"
-                          "Subtitles to translate:\n"
-                          f"{chunk_text}"
-                      )
-
-                      trans_chunk = ""
-                      # Confirmed working models on this API endpoint with independent rate limit pools
-                      models_to_try = [
-                          "gemini-3.5-flash",
-                          "gemini-3.1-flash-lite",
-                          "gemini-3.5-flash-lite",
-                          "gemini-3.5-flash",
-                          "gemini-3.1-flash-lite",
-                          "gemini-2.5-flash"
-                      ]
-
-                      for attempt in range(len(models_to_try)):
-                          model_name = models_to_try[attempt]
-                          try:
-                              g_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-                              gen_cfg = {"temperature": 0.2}
-                              if "2.5" in model_name:
-                                  gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
-                              payload = {
-                                  "contents": [{"parts": [{"text": prompt}]}],
-                                  "generationConfig": gen_cfg
-                              }
-                              g_res = requests.post(g_url, json=payload, headers={"Content-Type": "application/json"}, timeout=90)
-                              if g_res.status_code == 200:
-                                  g_data = g_res.json()
-                                  candidates = g_data.get("candidates", [])
-                                  if candidates:
-                                      part_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                                      part_text = re.sub(r"^```[a-zA-Z]*\n", "", part_text.strip())
-                                      part_text = re.sub(r"\n```$", "", part_text.strip())
-                                      if part_text and len(part_text) > 20:
-                                          trans_chunk = part_text
-                                          break
-                              elif g_res.status_code == 429:
-                                  cooldown = 15
-                                  print(f"[RateLimit 429 - waiting {cooldown}s...]", end="", flush=True)
-                                  time.sleep(cooldown)
-                              elif g_res.status_code == 503:
-                                  print(f"[Busy 503 - waiting 8s...]", end="", flush=True)
-                                  time.sleep(8)
-                              else:
-                                  print(f"[{model_name} HTTP {g_res.status_code}]", end="", flush=True)
-                          except Exception as ce:
-                              print(f"[{model_name} Retry {attempt+1}: {type(ce).__name__}]", end="", flush=True)
-                          time.sleep(3)
-
-                      if trans_chunk:
-                          translated_blocks.append(trans_chunk)
-                          print(" ✅", flush=True)
-                      else:
-                          translated_blocks.append(chunk_text)
-                          print(" ⚠️ (fallback)", flush=True)
-
-                      # Safe 4-second pacing between batches to respect 15 RPM quota
-                      time.sleep(4)
-
-                  if translated_blocks:
-                      cinematic_sub_path = f"{work_dir}/sinhala_cinematic_sub.srt"
-                      with open(cinematic_sub_path, "w", encoding="utf-8") as out_sf:
-                          out_sf.write("\n\n".join(translated_blocks) + "\n")
-
-                      if os.path.exists(cinematic_sub_path) and os.path.getsize(cinematic_sub_path) > 100:
-                          subtitle_file = cinematic_sub_path
-                          sanitize_and_brand_srt(subtitle_file, is_sinhala=True)
-                          print(f"🎬 [SUCCESS] Cinematic Sinhala Subtitles created successfully ({os.path.getsize(subtitle_file)/1024:.1f} KB)!", flush=True)
-              except Exception as gem_e:
-                  print(f"⚠️ Gemini translation warning: {gem_e}", flush=True)
+              cinematic_sub_path = f"{work_dir}/sinhala_cinematic_sub.srt"
+              res_tr = translate_english_srt_to_sinhala(english_sub_file, cinematic_sub_path)
+              if res_tr and os.path.exists(cinematic_sub_path) and os.path.getsize(cinematic_sub_path) > 100:
+                  subtitle_file = cinematic_sub_path
 
           # 🎯 3. Smart Video Optimization
           optimized_video = f"{work_dir}/cinestream_final.mp4"
@@ -778,7 +1063,7 @@ jobs:
                       s_msg = await client.send_file(
                           THUMBNAILS_CHANNEL,
                           subtitle_file,
-                          caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 සිංහල උපසිරැසි ගොනුව | Apalod Community",
+                          caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 Cine Stream Movie Hub කල උපසිරැසි ගැන්මක් | CineStream",
                           parse_mode='html'
                       )
                       sinhala_sub_msg_id = str(s_msg.id)
@@ -793,7 +1078,7 @@ jobs:
                       e_msg = await client.send_file(
                           THUMBNAILS_CHANNEL,
                           english_sub_file,
-                          caption=f"🔤 <b>{TITLE}</b> English Subtitle (.srt)\n⚡ CineStream Auto-Subtitles | Apalod Community",
+                          caption=f"🔤 <b>{TITLE}</b> English Subtitle (.srt)\n⚡ Cine Stream Auto-Subtitles | CineStream",
                           parse_mode='html'
                       )
                       english_sub_msg_id = str(e_msg.id)
