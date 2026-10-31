@@ -19,6 +19,10 @@ on:
         description: 'Poster Image URL (විකල්පයි)'
         required: false
         default: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=800'
+      audio_url:
+        description: 'Audio URL (.mp3, .m4a, .wav, or direct link) - Whisper English & Sinhala Subtitle Maker'
+        required: false
+        default: ''
       subtitle_url:
         description: 'Sinhala Subtitle (.srt) URL (විකල්පයි - උපසිරැසි Direct Link එකක් ඇත්නම්)'
         required: false
@@ -47,6 +51,7 @@ jobs:
           DOWNLOAD_URL: "${{ github.event.inputs.magnet }}"
           MOVIE_ID: "${{ github.event.inputs.movie_id }}"
           POSTER_URL: "${{ github.event.inputs.poster }}"
+          AUDIO_URL: "${{ github.event.inputs.audio_url || '' }}"
           SUBTITLE_URL: "${{ github.event.inputs.subtitle_url }}"
           QUEUE_ID: "${{ github.event.inputs.queue_id }}"
           ENGINE_PAT: "${{ secrets.ENGINE_PAT || '' }}"
@@ -69,6 +74,7 @@ jobs:
               URI = URI[URI.lower().find("magnet:?"):]
           MOVIE_ID = os.environ.get("MOVIE_ID", "").strip()
           POSTER = os.environ.get("POSTER_URL", "").strip()
+          AUDIO_URL = re.sub(r'[​-‏﻿‪-‮]', '', os.environ.get("AUDIO_URL", "")).strip()
           SUBTITLE_URL = os.environ.get("SUBTITLE_URL", "").strip()
           RTDB_BASE = os.environ.get("FIREBASE_RTDB_URL", "").rstrip("/")
           _raw_g = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -380,6 +386,112 @@ jobs:
                   print(f"⚠️ Gemini translation warning: {gem_e}", flush=True)
               return None
 
+          def download_audio_source(url, target_dir):
+              if not url:
+                  return None
+              print(f"🎧 Downloading Audio source from: {url}...", flush=True)
+              out_wav = f"{target_dir}/input_audio.wav"
+              try:
+                  cmd = [
+                      "yt-dlp",
+                      "--no-playlist",
+                      "-x", "--audio-format", "wav",
+                      "--audio-quality", "0",
+                      "-o", out_wav,
+                      url
+                  ]
+                  subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+                  if os.path.exists(out_wav) and os.path.getsize(out_wav) > 1000:
+                      print(f"✅ Audio downloaded & extracted via yt-dlp ({os.path.getsize(out_wav)/1024/1024:.2f} MB)!", flush=True)
+                      return out_wav
+              except Exception as yte:
+                  print(f"ℹ️ yt-dlp audio download note: {yte}", flush=True)
+
+              try:
+                  dl_path = f"{target_dir}/input_audio_raw"
+                  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                  with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+                      if r.status_code in [200, 206]:
+                          with open(dl_path, "wb") as f:
+                              for chunk in r.iter_content(chunk_size=1024*1024):
+                                  if chunk:
+                                      f.write(chunk)
+                  if os.path.exists(dl_path) and os.path.getsize(dl_path) > 1000:
+                      print(f"✅ Direct audio stream downloaded ({os.path.getsize(dl_path)/1024/1024:.2f} MB)!", flush=True)
+                      return dl_path
+              except Exception as re_err:
+                  print(f"⚠️ Direct download error: {re_err}", flush=True)
+              return None
+
+          def generate_english_srt_from_audio(audio_source_path, work_dir, title=""):
+              if not audio_source_path or not os.path.exists(audio_source_path):
+                  return None
+              print("\n🤖 [AI AUTO-SUBTITLES] Generating full English Subtitles via Local Faster-Whisper AI...", flush=True)
+              try:
+                  speech_audio = f"{work_dir}/speech_16k.wav"
+                  subprocess.run([
+                      "ffmpeg", "-y", "-i", audio_source_path,
+                      "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                      speech_audio
+                  ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                  if os.path.exists(speech_audio) and os.path.getsize(speech_audio) > 1000:
+                      import wave, numpy as np
+                      print("🎧 Reading audio into memory waveform buffer...", flush=True)
+                      with wave.open(speech_audio, "rb") as wf:
+                          n_frames = wf.getnframes()
+                          pcm_data = wf.readframes(n_frames)
+                          audio_np = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+                      from faster_whisper import WhisperModel
+                      print(f"🧠 Loading Faster-Whisper AI model (Audio length: {len(audio_np)/16000:.1f}s)...", flush=True)
+                      model = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=4)
+
+                      segments, info = model.transcribe(
+                          audio_np,
+                          beam_size=1,
+                          task="translate",
+                          vad_filter=True,
+                          vad_parameters=dict(
+                              threshold=0.5,
+                              min_silence_duration_ms=500,
+                              speech_pad_ms=400
+                          ),
+                          condition_on_previous_text=False,
+                          no_speech_threshold=0.6
+                      )
+                      print(f"🗣️ Audio Language Detected: '{info.language}' (Confidence: {info.language_probability*100:.1f}%)", flush=True)
+
+                      gen_sub = f"{work_dir}/english_ai_sub.srt"
+                      with open(gen_sub, "w", encoding="utf-8") as sf:
+                          s_idx = 1
+                          for seg in segments:
+                              if getattr(seg, 'no_speech_prob', 0) > 0.6:
+                                  continue
+                              txt = seg.text.strip()
+                              if not txt or txt in [".", "..", "...", "!", "?", "♪", "♫", "[music]", "(music)"]:
+                                  continue
+                              s_h, s_m = int(seg.start // 3600), int((seg.start % 3600) // 60)
+                              s_s, s_ms = int(seg.start % 60), int((seg.start - int(seg.start)) * 1000)
+                              e_h, e_m = int(seg.end // 3600), int((seg.end % 3600) // 60)
+                              e_s, e_ms = int(seg.end % 60), int((seg.end - int(seg.end)) * 1000)
+                              t_start = f"{s_h:02d}:{s_m:02d}:{s_s:02d},{s_ms:03d}"
+                              t_end = f"{e_h:02d}:{e_m:02d}:{e_s:02d},{e_ms:03d}"
+                              sf.write(f"{s_idx}\n{t_start} --> {t_end}\n{txt}\n\n")
+                              s_idx += 1
+
+                      try:
+                          os.remove(speech_audio)
+                      except Exception:
+                          pass
+
+                      if os.path.exists(gen_sub) and os.path.getsize(gen_sub) > 100:
+                          print(f"✅ AI Speech-to-Text generated {s_idx-1} full dialogue cues with exact timestamps!", flush=True)
+                          return gen_sub
+              except Exception as w_err:
+                  print(f"⚠️ Faster-Whisper notice: {w_err}", flush=True)
+              return None
+
           async def upload_subtitle_only_mode(sinhala_f, english_f):
               print("\n🚀 Connecting to Telegram MTProto API for Subtitle Upload...", flush=True)
               client = TelegramClient(
@@ -424,9 +536,23 @@ jobs:
                       print(f"⚠️ English Subtitle upload error: {ee}", flush=True)
 
               try:
+                  if sinhala_f and os.path.exists(sinhala_f):
+                      await client.send_file(
+                          MOVIES_CHANNEL,
+                          sinhala_f,
+                          caption=f"📝 <b>{TITLE}</b> Sinhala Subtitle (.srt)\n🇱🇰 Cine Stream Movie Hub කල උපසිරැසි ගැන්මක්",
+                          parse_mode='html'
+                      )
+                  if english_f and os.path.exists(english_f):
+                      await client.send_file(
+                          MOVIES_CHANNEL,
+                          english_f,
+                          caption=f"🔤 <b>{TITLE}</b> English Subtitle (.srt)\n⚡ Cine Stream Auto-Subtitles",
+                          parse_mode='html'
+                      )
                   await client.send_message(
                       MOVIES_CHANNEL,
-                      f"📝 <b>{TITLE}</b>\n🇱🇰 චිත්‍රපටය සඳහා නව සිංහල උපසිරැසි (Sinhala Subtitle) සාර්ථකව යාවත්කාලීන කරන ලදී!\n🇱🇰 Cine Stream Movie Hub කල උපසිරැසි ගැන්මක්",
+                      f"📝 <b>{TITLE}</b>\n🇱🇰 උපසිරැසි ගොනු (Subtitles) සාර්ථකව සකසා Telegram වෙත Upload කරන ලදී!\n🇱🇰 Cine Stream Movie Hub",
                       parse_mode='html'
                   )
               except Exception as me:
@@ -487,6 +613,57 @@ jobs:
                       pass
 
               await client.disconnect()
+
+          # 🎯 0.0 AUDIO-TO-SUBTITLES MODE (Whisper English + Gemini Sinhala -> Telegram Upload)
+          AUDIO_EXTS = [".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".alac", ".m4b"]
+          is_audio_mode = False
+          target_audio_link = ""
+
+          if AUDIO_URL:
+              is_audio_mode = True
+              target_audio_link = AUDIO_URL
+          elif URI and any(URI.lower().split("?")[0].endswith(ext) for ext in AUDIO_EXTS):
+              is_audio_mode = True
+              target_audio_link = URI
+          elif URI and ("/audio/" in URI.lower() or "format=audio" in URI.lower()):
+              is_audio_mode = True
+              target_audio_link = URI
+
+          if is_audio_mode:
+              print("\n=======================================================", flush=True)
+              print("🎧 [AUDIO-TO-SUBTITLES MODE ACTIVATED]", flush=True)
+              print(f"🎬 Title     : '{TITLE}'", flush=True)
+              print(f"🔗 Audio URL : {target_audio_link}", flush=True)
+              print(f"🆔 Movie ID  : {MOVIE_ID}", flush=True)
+              print("ℹ️ Generating English Subtitle (Whisper) -> Sinhala Subtitle (Gemini) -> Uploading both to Telegram...", flush=True)
+              print("=======================================================\n", flush=True)
+
+              raw_audio = download_audio_source(target_audio_link, work_dir)
+              if not raw_audio or not os.path.exists(raw_audio):
+                  print("❌ Error: Could not download audio from provided URL!", flush=True)
+                  sys.exit(1)
+
+              eng_sub = generate_english_srt_from_audio(raw_audio, work_dir, TITLE)
+              if not eng_sub or not os.path.exists(eng_sub):
+                  print("❌ Error: Faster-Whisper could not generate English subtitles from audio!", flush=True)
+                  sys.exit(1)
+
+              sanitize_and_brand_srt(eng_sub, is_sinhala=False)
+              print("✅ English subtitle successfully generated & branded!", flush=True)
+
+              sin_sub = f"{work_dir}/sinhala_cinematic_sub.srt"
+              res_tr = translate_english_srt_to_sinhala(eng_sub, sin_sub)
+              if sin_sub and os.path.exists(sin_sub) and os.path.getsize(sin_sub) > 100:
+                  sanitize_and_brand_srt(sin_sub, is_sinhala=True)
+                  print("✅ Sinhala subtitle successfully translated & branded!", flush=True)
+              else:
+                  print("⚠️ Sinhala translation notice: Proceeding with English subtitle.", flush=True)
+                  sin_sub = None
+
+              print("\n📤 Uploading Subtitle files directly to Telegram Channels...", flush=True)
+              asyncio.run(upload_subtitle_only_mode(sin_sub, eng_sub))
+              print("\n🎉 [SUCCESS] Audio Subtitles generated and uploaded to Telegram successfully!", flush=True)
+              sys.exit(0)
 
           # 🎯 0. SUBTITLE-ONLY MODE CHECK
           is_subtitle_only = (not URI) or (URI.upper() in ["SKIP", "NONE", "NULL", "NO", "EMPTY"]) or (not URI.startswith("http://") and not URI.startswith("https://") and not URI.startswith("magnet:?") and not URI.startswith("bc://bt/"))
@@ -769,76 +946,7 @@ jobs:
 
           # 🎯 2.2 AI Speech-to-Text via Faster-Whisper (Direct NumPy PCM Buffer - 100% PyAV safe)
           if not subtitle_file and not english_sub_file:
-              print("🤖 [AI AUTO-SUBTITLES] Generating full English Subtitles via Local Faster-Whisper AI...", flush=True)
-              try:
-                  speech_audio = f"{work_dir}/speech_16k.wav"
-                  # Extract lightweight 16kHz mono 16-bit PCM audio in seconds
-                  subprocess.run([
-                      "ffmpeg", "-y", "-i", input_video,
-                      "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-                      speech_audio
-                  ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-                  if os.path.exists(speech_audio) and os.path.getsize(speech_audio) > 10000:
-                      import wave, numpy as np
-                      print("🎧 Reading audio into memory waveform buffer...", flush=True)
-                      with wave.open(speech_audio, "rb") as wf:
-                          n_frames = wf.getnframes()
-                          pcm_data = wf.readframes(n_frames)
-                          audio_np = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
-
-                      from faster_whisper import WhisperModel
-                      print(f"🧠 Loading Faster-Whisper AI model (Audio length: {len(audio_np)/16000:.1f}s)...", flush=True)
-                      # Multilingual tiny model supports English, Hindi, Telugu, Tamil, Korean, etc.
-                      model = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=4)
-                      
-                      # 🎙️ Silero VAD (Voice Activity Detection):
-                      # Only captures real human dialogue. Skips silence, background music, explosions, and ambient noises.
-                      # condition_on_previous_text=False completely prevents infinite loop hallucinations.
-                      segments, info = model.transcribe(
-                          audio_np,
-                          beam_size=1,
-                          task="translate",
-                          vad_filter=True,
-                          vad_parameters=dict(
-                              threshold=0.5,
-                              min_silence_duration_ms=500,
-                              speech_pad_ms=400
-                          ),
-                          condition_on_previous_text=False,
-                          no_speech_threshold=0.6
-                      )
-                      print(f"🗣️ Audio Language Detected: '{info.language}' (Confidence: {info.language_probability*100:.1f}%)", flush=True)
-
-                      gen_sub = f"{work_dir}/english_ai_sub.srt"
-                      with open(gen_sub, "w", encoding="utf-8") as sf:
-                          s_idx = 1
-                          for seg in segments:
-                              # Discard segments with high no-speech probability
-                              if getattr(seg, 'no_speech_prob', 0) > 0.6:
-                                  continue
-                              txt = seg.text.strip()
-                              # Discard music notes or hallucinated punctuation
-                              if not txt or txt in [".", "..", "...", "!", "?", "♪", "♫", "[music]", "(music)"]:
-                                  continue
-                              s_h, s_m = int(seg.start // 3600), int((seg.start % 3600) // 60)
-                              s_s, s_ms = int(seg.start % 60), int((seg.start - int(seg.start)) * 1000)
-                              e_h, e_m = int(seg.end // 3600), int((seg.end % 3600) // 60)
-                              e_s, e_ms = int(seg.end % 60), int((seg.end - int(seg.end)) * 1000)
-                              t_start = f"{s_h:02d}:{s_m:02d}:{s_s:02d},{s_ms:03d}"
-                              t_end = f"{e_h:02d}:{e_m:02d}:{e_s:02d},{e_ms:03d}"
-                              sf.write(f"{s_idx}\n{t_start} --> {t_end}\n{txt}\n\n")
-                              s_idx += 1
-
-                      if os.path.exists(gen_sub) and os.path.getsize(gen_sub) > 100:
-                          english_sub_file = gen_sub
-                          print(f"✅ AI Speech-to-Text generated {s_idx-1} full dialogue cues with exact timestamps!", flush=True)
-                      try:
-                          os.remove(speech_audio)
-                      except Exception:
-                          pass
-              except Exception as w_err:
-                  print(f"⚠️ Faster-Whisper notice: {w_err}", flush=True)
+              english_sub_file = generate_english_srt_from_audio(input_video, work_dir, TITLE)
 
           # 🎯 2.2 AI Cinematic Sinhala Subtitle Generation via Gemini AI (100% Full Dialogue Coverage)
           if not subtitle_file and english_sub_file and os.path.exists(english_sub_file) and GEMINI_API_KEY:
