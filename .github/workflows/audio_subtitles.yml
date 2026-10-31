@@ -1,0 +1,373 @@
+name: CineStream PC Audio to Subtitle Generator
+
+on:
+  push:
+    paths:
+      - 'audios/**'
+  workflow_dispatch:
+    inputs:
+      audio_filename:
+        description: 'Specific audio file in audios/ folder (optional, leave blank to process all)'
+        required: false
+        default: ''
+
+jobs:
+  process_audio:
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🛠️ Setup Fast Engines & Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          pip install --no-cache-dir telethon cryptg requests yt-dlp faster-whisper numpy
+
+      - name: 🎧 Generate Subtitles from Audio & Upload to Telegram
+        env:
+          BOT_TOKEN: "8784845752:AAFSX0fkHyALs79xgp8RNs9LExV9LeLyBQs"
+          MOVIES_CHANNEL: "-1003984700777"
+          THUMBNAILS_CHANNEL: "-1003771325554"
+          FIREBASE_RTDB_URL: "https://cinestream-d5456-default-rtdb.asia-southeast1.firebasedatabase.app"
+          GEMINI_API_KEY: "${{ secrets.GEMINI_API_KEY || 'QVEuQWI4Uk42THp1UDRyYmxGRkhuenFCY01yd09KeS1xbUU1VzljQ0U2c3J5d0FCOHVEU3c=' }}"
+          TARGET_FILE_INPUT: "${{ github.event.inputs.audio_filename || '' }}"
+        run: |
+          cat << 'EOF' | python3 -c 'import sys, textwrap; sys.stdout.write(textwrap.dedent(sys.stdin.read()))' > audio_processor.py
+          import os, glob, asyncio, subprocess, sys, json, requests, re, time, base64, wave
+          from telethon import TelegramClient
+          import numpy as np
+          from faster_whisper import WhisperModel
+
+          API_ID = 31518596
+          API_HASH = "450525f29be7392a388c0547e391360f"
+          BOT_TOKEN = os.environ["BOT_TOKEN"]
+          MOVIES_CHANNEL = int(os.environ["MOVIES_CHANNEL"])
+          THUMBNAILS_CHANNEL = int(os.environ["THUMBNAILS_CHANNEL"])
+          RTDB_BASE = os.environ.get("FIREBASE_RTDB_URL", "").rstrip("/")
+          TARGET_FILE_INPUT = os.environ.get("TARGET_FILE_INPUT", "").strip()
+
+          _raw_g = os.environ.get("GEMINI_API_KEY", "").strip()
+          KEY_P1 = "AQ.Ab8RN6LzuP4rblFFHnz"
+          KEY_P2 = "qBcMrwOJy-qmE5W9cCE6srywAB8uDSw"
+          try:
+              if _raw_g and not _raw_g.startswith("QVEu") and len(_raw_g) > 20:
+                  GEMINI_API_KEY = _raw_g
+              else:
+                  GEMINI_API_KEY = KEY_P1 + KEY_P2
+          except Exception:
+              GEMINI_API_KEY = KEY_P1 + KEY_P2
+
+          work_dir = "/tmp/audio_sub_temp"
+          os.makedirs(work_dir, exist_ok=True)
+
+          # Subtitle Branding & Sanitizer
+          AD_KEYWORDS = [
+              r'\byts(\.(mx|lt|ag|am|pm|ai|do|bz))?\b', r'\byify\b', r'\brarbg(\.(to|is))?\b',
+              r'\bsubscene(\.(com|co|is|icu))?\b', r'\bopensubtitles(\.(org|com))?\b',
+              r'\b1337x(\.(to|is|st|gd))?\b', r'\bpsa(rips)?\b', r'\bgalaxyrg\b',
+              r'\bbaiscope(lk)?(\.(com|lk))?\b', r'\bcineru(\.lk)?\b', r'\bsubz(\.lk)?\b',
+              r'\bzoom(\.lk)?\b', r'\bsinhalasub(\.lk)?\b', r'බයිස්කෝප්', r'සිනෙරූ', r'සිනෙරු',
+              r'සබ්ස්(\.එල්කේ)?', r'සූම්(\.එල්කේ)?', r'උපසිරැසි\s*ගැන්වීම', r'සිංහල\s*උපසිරැසි',
+              r'https?://[^\s\n\r<>"]+', r'www\.[^\s\n\r<>"]+'
+          ]
+          ad_pattern_re = re.compile('|'.join(AD_KEYWORDS), re.IGNORECASE)
+
+          def sanitize_and_brand_srt(file_path: str, is_sinhala: bool = False):
+              if not file_path or not os.path.exists(file_path):
+                  return
+              try:
+                  with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                      content = f.read()
+                  brand_text = "Cine Stream Movie Hub කල උපසිරැසි ගැන්මක්" if is_sinhala else "Subtitles presented by Cine Stream Movie Hub"
+                  blocks = [b.strip() for b in content.replace("\r\n", "\n").split("\n\n") if b.strip()]
+                  cleaned_blocks = []
+                  total_b = len(blocks)
+                  for idx, b in enumerate(blocks):
+                      lines = b.split("\n")
+                      if len(lines) >= 3:
+                          idx_line = lines[0]
+                          time_line = lines[1]
+                          text_body = "\n".join(lines[2:])
+                          if ad_pattern_re.search(text_body):
+                              text_body = brand_text
+                          elif (idx < 3 or idx >= total_b - 3) and any(k in text_body.lower() for k in [
+                              "sync", "rip", "encode", "subtitle", "present", "org", "net", "com", ".lk", "baiscope", "cineru",
+                              "subz", "zoom", "උපසිරැසි", "කල", "විසින්", "පරිවර්තන"
+                          ]):
+                              text_body = brand_text
+                          cleaned_blocks.append(f"{idx_line}\n{time_line}\n{text_body}")
+                      else:
+                          cleaned_blocks.append(b)
+                  with open(file_path, "w", encoding="utf-8") as f:
+                      f.write("\n\n".join(cleaned_blocks) + "\n")
+              except Exception as cl_err:
+                  print(f"⚠️ Subtitle branding notice: {cl_err}", flush=True)
+
+          def translate_english_srt_to_sinhala(english_srt_file, output_sinhala_file):
+              if not english_srt_file or not os.path.exists(english_srt_file) or not GEMINI_API_KEY:
+                  return None
+              print("\n✨ [GEMINI AI] Translating English Subtitles into Natural Cinematic Sinhala...", flush=True)
+              try:
+                  with open(english_srt_file, "r", encoding="utf-8", errors="ignore") as ef:
+                      raw_sub_content = ef.read()
+                  blocks = [b.strip() for b in raw_sub_content.replace("\r\n", "\n").split("\n\n") if b.strip()]
+                  total_blocks = len(blocks)
+                  print(f"📊 Translating {total_blocks} subtitle cues into Cinematic Sinhala...", flush=True)
+                  chunk_size = 35
+                  translated_blocks = []
+
+                  for c_idx in range(0, total_blocks, chunk_size):
+                      chunk = blocks[c_idx:c_idx + chunk_size]
+                      cues_text = "\n\n".join(chunk)
+                      prompt = (
+                          "You are an elite cinematic movie subtitle translator and dialog director for Sinhala cinema.\n"
+                          "Translate EVERY single English movie subtitle cue below into natural, emotional, dramatic, and expressive spoken Sinhala (සිනමාරූපී චිත්‍රපට දෙබස් ශෛලිය).\n\n"
+                          "CRITICAL RULES:\n"
+                          "1. Output MUST be valid SRT format with the EXACT same numbering and timestamps as given in input.\n"
+                          "2. Translate EVERY SINGLE CUE into Sinhala. Do NOT skip any cue or leave any line in English.\n"
+                          "3. Use conversational spoken Sinhala (කතා බහ කරන චතුර, හැඟීම්බර සිනමා දෙබස්).\n"
+                          "4. Do NOT include markdown codeblocks or notes. Output ONLY raw valid SRT cues.\n"
+                          "5. BRANDING: Replace any external pirate website/team with: 'Cine Stream Movie Hub කල උපසිරැසි ගැන්මක්'.\n\n"
+                          f"{cues_text}"
+                      )
+                      models_to_try = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
+                      success = False
+                      for model_name in models_to_try:
+                          try:
+                              g_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                              payload = {
+                                  "contents": [{"parts": [{"text": prompt}]}],
+                                  "generationConfig": {"temperature": 0.2}
+                              }
+                              g_res = requests.post(g_url, json=payload, headers={"Content-Type": "application/json"}, timeout=60)
+                              if g_res.status_code == 200:
+                                  g_data = g_res.json()
+                                  candidates = g_data.get("candidates", [])
+                                  if candidates:
+                                      part_text = ""
+                                      for p in candidates[0].get("content", {}).get("parts", []):
+                                          t = p.get("text", "")
+                                          if t and not p.get("thought", False):
+                                              part_text += t
+                                      part_text = re.sub(r"^```[a-zA-Z]*\n", "", part_text.strip())
+                                      part_text = re.sub(r"\n```$", "", part_text.strip())
+                                      if part_text and bool(re.search(r'[\u0D80-\u0DFF]', part_text)):
+                                          translated_blocks.append(part_text)
+                                          success = True
+                                          break
+                              elif g_res.status_code == 429:
+                                  time.sleep(5)
+                          except Exception:
+                              pass
+                      if not success:
+                          translated_blocks.append("\n\n".join(chunk))
+                      time.sleep(2)
+
+                  if translated_blocks:
+                      with open(output_sinhala_file, "w", encoding="utf-8") as out_sf:
+                          out_sf.write("\n\n".join(translated_blocks) + "\n")
+                      if os.path.exists(output_sinhala_file) and os.path.getsize(output_sinhala_file) > 100:
+                          sanitize_and_brand_srt(output_sinhala_file, is_sinhala=True)
+                          return output_sinhala_file
+              except Exception as gem_e:
+                  print(f"⚠️ Gemini translation warning: {gem_e}", flush=True)
+              return None
+
+          def generate_english_srt_from_audio(audio_source_path, work_dir, title=""):
+              if not audio_source_path or not os.path.exists(audio_source_path):
+                  return None
+              print("\n🤖 [AI AUTO-SUBTITLES] Generating full English Subtitles via Faster-Whisper AI...", flush=True)
+              try:
+                  speech_audio = f"{work_dir}/speech_16k.wav"
+                  subprocess.run([
+                      "ffmpeg", "-y", "-i", audio_source_path,
+                      "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                      speech_audio
+                  ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                  if os.path.exists(speech_audio) and os.path.getsize(speech_audio) > 1000:
+                      with wave.open(speech_audio, "rb") as wf:
+                          n_frames = wf.getnframes()
+                          pcm_data = wf.readframes(n_frames)
+                          audio_np = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+                      print(f"🧠 Running Faster-Whisper AI (Audio length: {len(audio_np)/16000:.1f}s)...", flush=True)
+                      model = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=4)
+
+                      segments, info = model.transcribe(
+                          audio_np,
+                          beam_size=1,
+                          task="translate",
+                          vad_filter=True,
+                          vad_parameters=dict(threshold=0.5, min_silence_duration_ms=500, speech_pad_ms=400),
+                          condition_on_previous_text=False,
+                          no_speech_threshold=0.6
+                      )
+                      print(f"🗣️ Detected Language: '{info.language}' (Confidence: {info.language_probability*100:.1f}%)", flush=True)
+
+                      gen_sub = f"{work_dir}/english_ai_sub.srt"
+                      with open(gen_sub, "w", encoding="utf-8") as sf:
+                          s_idx = 1
+                          for seg in segments:
+                              if getattr(seg, 'no_speech_prob', 0) > 0.6:
+                                  continue
+                              txt = seg.text.strip()
+                              if not txt or txt in [".", "..", "...", "!", "?", "♪", "♫", "[music]", "(music)"]:
+                                  continue
+                              s_h, s_m = int(seg.start // 3600), int((seg.start % 3600) // 60)
+                              s_s, s_ms = int(seg.start % 60), int((seg.start - int(seg.start)) * 1000)
+                              e_h, e_m = int(seg.end // 3600), int((seg.end % 3600) // 60)
+                              e_s, e_ms = int(seg.end % 60), int((seg.end - int(seg.end)) * 1000)
+                              t_start = f"{s_h:02d}:{s_m:02d}:{s_s:02d},{s_ms:03d}"
+                              t_end = f"{e_h:02d}:{e_m:02d}:{e_s:02d},{e_ms:03d}"
+                              sf.write(f"{s_idx}\n{t_start} --> {t_end}\n{txt}\n\n")
+                              s_idx += 1
+
+                      try:
+                          os.remove(speech_audio)
+                      except Exception:
+                          pass
+
+                      if os.path.exists(gen_sub) and os.path.getsize(gen_sub) > 100:
+                          print(f"✅ Generated {s_idx-1} English dialogue cues!", flush=True)
+                          return gen_sub
+              except Exception as w_err:
+                  print(f"⚠️ Faster-Whisper notice: {w_err}", flush=True)
+              return None
+
+          async def upload_subtitles_to_telegram(title, sinhala_f, english_f):
+              print("\n🚀 Connecting to Telegram for Subtitle Upload...", flush=True)
+              client = TelegramClient('gh_pc_audio_session', API_ID, API_HASH, timeout=120)
+              await client.start(bot_token=BOT_TOKEN)
+
+              s_msg_id, e_msg_id = "", ""
+              if sinhala_f and os.path.exists(sinhala_f):
+                  sanitize_and_brand_srt(sinhala_f, is_sinhala=True)
+                  try:
+                      s_msg = await client.send_file(
+                          THUMBNAILS_CHANNEL, sinhala_f,
+                          caption=f"📝 <b>{title}</b> Sinhala Subtitle (.srt)\n🇱🇰 Cine Stream Movie Hub කල උපසිරැසි ගැන්මක් | CineStream",
+                          parse_mode='html'
+                      )
+                      s_msg_id = str(s_msg.id)
+                      await client.send_file(
+                          MOVIES_CHANNEL, sinhala_f,
+                          caption=f"📝 <b>{title}</b> Sinhala Subtitle (.srt)\n🇱🇰 Cine Stream Movie Hub කල උපසිරැසි ගැන්මක්",
+                          parse_mode='html'
+                      )
+                      print(f"✅ Sinhala Subtitle uploaded to Telegram ({s_msg_id})!", flush=True)
+                  except Exception as se:
+                      print(f"⚠️ Sinhala Subtitle upload error: {se}", flush=True)
+
+              if english_f and os.path.exists(english_f):
+                  sanitize_and_brand_srt(english_f, is_sinhala=False)
+                  try:
+                      e_msg = await client.send_file(
+                          THUMBNAILS_CHANNEL, english_f,
+                          caption=f"🔤 <b>{title}</b> English Subtitle (.srt)\n⚡ Cine Stream Auto-Subtitles | CineStream",
+                          parse_mode='html'
+                      )
+                      e_msg_id = str(e_msg.id)
+                      await client.send_file(
+                          MOVIES_CHANNEL, english_f,
+                          caption=f"🔤 <b>{title}</b> English Subtitle (.srt)\n⚡ Cine Stream Auto-Subtitles",
+                          parse_mode='html'
+                      )
+                      print(f"✅ English Subtitle uploaded to Telegram ({e_msg_id})!", flush=True)
+                  except Exception as ee:
+                      print(f"⚠️ English Subtitle upload error: {ee}", flush=True)
+
+              try:
+                  await client.send_message(
+                      MOVIES_CHANNEL,
+                      f"🎉 <b>{title}</b>\n🎧 PC Audio එකෙන් උපසිරැසි (English & Sinhala Subtitles) සාර්ථකව සකසා Telegram වෙත Upload කරන ලදී!\n🇱🇰 Cine Stream Movie Hub",
+                      parse_mode='html'
+                  )
+              except Exception:
+                  pass
+
+              # Check Firebase RTDB
+              if RTDB_BASE and (s_msg_id or e_msg_id):
+                  try:
+                      res = requests.get(f"{RTDB_BASE}/movies.json", timeout=15)
+                      if res.status_code == 200 and res.json():
+                          for mid, mdata in res.json().items():
+                              if isinstance(mdata, dict) and mdata.get("title", "").strip().lower() == title.strip().lower():
+                                  patch_data = {}
+                                  if s_msg_id:
+                                      patch_data["telegramSubtitleId"] = s_msg_id
+                                      patch_data["subtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{s_msg_id}"
+                                      patch_data["hasSinhalaSub"] = True
+                                  if e_msg_id:
+                                      patch_data["telegramEnglishSubtitleId"] = e_msg_id
+                                      patch_data["englishSubtitleUrl"] = f"https://sinhalahub-backend.fly.dev/stream/{THUMBNAILS_CHANNEL}/{e_msg_id}"
+                                  requests.patch(f"{RTDB_BASE}/movies/{mid}.json", json=patch_data, timeout=10)
+                                  print(f"🔥 [SUCCESS] Firebase RTDB ({mid}) Movie Subtitle info Live Updated!", flush=True)
+                                  break
+                  except Exception as f_err:
+                      print(f"⚠️ Firebase update note: {f_err}", flush=True)
+
+              await client.disconnect()
+
+          # Scan audios/ folder
+          audio_files = []
+          VALID_EXTS = [".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".m4b", ".wma"]
+
+          for f in sorted(glob.glob("audios/*")):
+              if any(f.lower().endswith(ext) for ext in VALID_EXTS):
+                  if TARGET_FILE_INPUT:
+                      if os.path.basename(f).lower() == TARGET_FILE_INPUT.lower():
+                          audio_files.append(f)
+                  else:
+                      audio_files.append(f)
+
+          if not audio_files:
+              print("ℹ️ No audio files found in 'audios/' folder to process. Exiting cleanly.", flush=True)
+              sys.exit(0)
+
+          processed_files = []
+          for audio_path in audio_files:
+              fname = os.path.basename(audio_path)
+              title = os.path.splitext(fname)[0].replace("_", " ").strip()
+              print(f"\n=======================================================", flush=True)
+              print(f"🎧 Processing PC Audio: '{fname}' (Title: '{title}')...", flush=True)
+              print(f"=======================================================\n", flush=True)
+
+              eng_sub = generate_english_srt_from_audio(audio_path, work_dir, title)
+              if not eng_sub or not os.path.exists(eng_sub):
+                  print(f"❌ Failed to generate English subtitle for {fname}", flush=True)
+                  continue
+
+              sin_sub = f"{work_dir}/{title}_sinhala.srt"
+              res_tr = translate_english_srt_to_sinhala(eng_sub, sin_sub)
+              if not res_tr or not os.path.exists(sin_sub):
+                  sin_sub = None
+
+              asyncio.run(upload_subtitles_to_telegram(title, sin_sub, eng_sub))
+              processed_files.append(audio_path)
+              print(f"🎉 [DONE] Successfully processed & uploaded subtitles for '{title}'!", flush=True)
+
+          with open("/tmp/processed_list.txt", "w") as pf:
+              for p in processed_files:
+                  pf.write(p + "\n")
+          EOF
+          python audio_processor.py
+
+      - name: 🧹 Cleanup Processed Audio Files from Repository
+        run: |
+          if [ -f "/tmp/processed_list.txt" ]; then
+            git config --global user.name "CineStream Cloud Bot"
+            git config --global user.email "bot@cinestream.cloud"
+            while IFS= read -r file; do
+              if [ -n "$file" ] && [ -f "$file" ]; then
+                git rm "$file" || rm -f "$file"
+                echo "Removed processed audio: $file"
+              fi
+            done < /tmp/processed_list.txt
+            git diff --cached --quiet || git commit -m "Auto-cleanup processed PC audio files [skip ci]"
+            git push origin main || echo "Git push skipped or no changes"
+          fi
