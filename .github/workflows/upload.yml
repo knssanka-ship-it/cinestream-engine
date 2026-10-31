@@ -389,6 +389,11 @@ jobs:
           def download_audio_source(url, target_dir):
               if not url:
                   return None
+              tg_m = re.search(r't\.me/[^/]+/(\d+)', url)
+              if tg_m:
+                  msg_id = tg_m.group(1)
+                  url = f"https://sinhalahub-backend.fly.dev/stream/{msg_id}"
+                  print(f"✈️ Resolved Telegram post to Fly.dev direct stream: {url}", flush=True)
               print(f"🎧 Downloading Audio source from: {url}...", flush=True)
               out_wav = f"{target_dir}/input_audio.wav"
               try:
@@ -626,6 +631,9 @@ jobs:
               is_audio_mode = True
               target_audio_link = URI
           elif URI and ("/audio/" in URI.lower() or "format=audio" in URI.lower()):
+              is_audio_mode = True
+              target_audio_link = URI
+          elif URI and ("t.me/" in URI.lower() and re.search(r't\.me/[^/]+/(\d+)', URI)):
               is_audio_mode = True
               target_audio_link = URI
 
